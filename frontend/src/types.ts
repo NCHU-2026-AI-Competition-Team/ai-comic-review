@@ -1,37 +1,40 @@
-export type ReviewStatus = 'pending' | 'processing' | 'completed' | 'failed'
+export type VideoStatus = 'processing' | 'processed' | 'failed'
 
-export interface DimensionScore {
-  name: string
-  score: number
-  max_score: number
-  comment: string
+export interface VideoMetadata {
+  duration: number | null
+  width: number | null
+  height: number | null
+  fps: number | null
+  codec: string | null
+  bitrate: number | null
 }
 
-export type IssueSeverity = 'info' | 'warning' | 'error'
-
-export interface ReviewIssue {
-  page: number
-  severity: IssueSeverity
-  category: string
-  description: string
-  suggestion: string
+export interface FrameInfo {
+  frame_id: string
+  timestamp_ms: number
+  timestamp: string
+  path: string
 }
 
-export interface ReviewResult {
-  review_id: string
-  title: string
-  status: ReviewStatus
-  overall_score: number | null
-  summary: string
-  dimensions: DimensionScore[]
-  issues: ReviewIssue[]
+export interface FramesInfo {
+  count: number
+  frames: FrameInfo[]
+}
+
+export interface VideoJob {
+  video_id: string
+  filename: string
+  status: VideoStatus
+  error: string | null
+  metadata: VideoMetadata | null
+  frames: FramesInfo | null
   created_at: string
-  finished_at: string | null
 }
 
-export interface UploadPayload {
-  title: string
-  genre: string
-  authorNote: string
-  files: File[]
+export interface VideoUploadResponse {
+  video_id: string
+  filename: string
+  status: VideoStatus
+  metadata: VideoMetadata | null
+  frames: FramesInfo | null
 }
