@@ -33,7 +33,7 @@ def _validate_video_id(video_id: str) -> str:
 def _try_process(video_id: str) -> None:
     """尝试触发视频处理流水线。
 
-    app.services.video.process_video 由后续 worker 实现，
+    app.services.video.process_video 由视频处理服务提供，
     缺失（ImportError）时保持 processing 状态；其他异常记为 failed。
     """
     try:

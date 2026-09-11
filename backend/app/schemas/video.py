@@ -9,7 +9,7 @@ VideoStatus = Literal["processed", "failed", "processing"]
 
 
 class VideoMetadata(BaseModel):
-    """视频元数据，当前阶段全部可选，由后续抽帧 worker 填充。"""
+    """视频元数据，当前阶段全部可选，由视频处理服务（app.services.video）填充。"""
 
     duration: Optional[float] = Field(default=None, description="时长（秒）")
     width: Optional[int] = Field(default=None, description="宽度（像素）")

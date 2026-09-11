@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     backend_host: str = "127.0.0.1"
     backend_port: int = 8000
     storage_dir: str = "storage"
+    frame_extraction_fps: float = 2.0
 
     @property
     def storage_path(self) -> Path:
