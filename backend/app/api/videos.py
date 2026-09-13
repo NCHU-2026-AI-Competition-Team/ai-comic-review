@@ -3,7 +3,6 @@
 import json
 import logging
 import re
-import shutil
 import uuid
 from pathlib import Path
 
@@ -49,6 +48,22 @@ def _try_process(video_id: str) -> None:
         raise
 
 
+def _save_upload(file: UploadFile, dest: Path, max_bytes: int) -> None:
+    """流式保存上传文件，超过大小限制时清理部分文件并返回 413。"""
+    size = 0
+    exceeded = False
+    with dest.open("wb") as out:
+        while chunk := file.file.read(1024 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                exceeded = True
+                break
+            out.write(chunk)
+    if exceeded:
+        dest.unlink(missing_ok=True)
+        raise HTTPException(status_code=413, detail="上传文件超过大小限制")
+
+
 @router.post("", response_model=VideoUploadResponse, status_code=201)
 def upload_video(file: UploadFile) -> VideoUploadResponse:
     """上传视频：校验格式、保存原始文件、落盘任务记录并尝试触发处理。"""
@@ -64,8 +79,7 @@ def upload_video(file: UploadFile) -> VideoUploadResponse:
     video_id = str(uuid.uuid4())
     dest = settings.uploads_path / f"{video_id}{ext}"
     settings.uploads_path.mkdir(parents=True, exist_ok=True)
-    with dest.open("wb") as out:
-        shutil.copyfileobj(file.file, out)
+    _save_upload(file, dest, max_bytes=settings.max_upload_size_mb * 1024 * 1024)
 
     job = registry.save_job(VideoJob(video_id=video_id, filename=original_name))
 

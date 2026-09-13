@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     backend_port: int = 8000
     storage_dir: str = "storage"
     frame_extraction_fps: float = 2.0
+    max_upload_size_mb: int = 500
 
     @property
     def storage_path(self) -> Path:
