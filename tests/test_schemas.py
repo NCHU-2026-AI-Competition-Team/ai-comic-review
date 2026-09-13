@@ -48,6 +48,33 @@ def test_sampling_info_method_validation() -> None:
         SamplingInfo(method="unknown")  # type: ignore[arg-type]
 
 
+def test_sampling_info_fixed_fps_requires_fps() -> None:
+    with pytest.raises(ValidationError):
+        SamplingInfo(method="fixed_fps")
+
+
+def test_sampling_info_fixed_fps_rejects_threshold() -> None:
+    with pytest.raises(ValidationError):
+        SamplingInfo(method="fixed_fps", fps=2.0, threshold=0.4)
+
+
+def test_sampling_info_scene_change_requires_threshold() -> None:
+    with pytest.raises(ValidationError):
+        SamplingInfo(method="scene_change")
+
+
+def test_sampling_info_scene_change_rejects_fps() -> None:
+    with pytest.raises(ValidationError):
+        SamplingInfo(method="scene_change", threshold=0.4, fps=2.0)
+
+
+def test_sampling_info_valid_combinations() -> None:
+    fixed = SamplingInfo(method="fixed_fps", fps=2.0)
+    assert fixed.fps == 2.0 and fixed.threshold is None
+    scene = SamplingInfo(method="scene_change", threshold=0.4)
+    assert scene.threshold == 0.4 and scene.fps is None
+
+
 def test_video_upload_response_invalid_status() -> None:
     with pytest.raises(ValidationError):
         VideoUploadResponse(video_id="vid-3", filename="demo.mp4", status="unknown")  # type: ignore[arg-type]

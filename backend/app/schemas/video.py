@@ -3,7 +3,7 @@
 from datetime import datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 VideoStatus = Literal["processed", "failed", "processing"]
 
@@ -35,11 +35,26 @@ class FrameInfo(BaseModel):
 
 
 class SamplingInfo(BaseModel):
-    """采样方式描述：固定帧率记录 fps，镜头切换检测记录 threshold。"""
+    """采样方式描述：fixed_fps 只记录 fps，scene_change 只记录 threshold，二者互斥。"""
 
     method: SamplingMethod = Field(description="采样方式：fixed_fps 固定帧率 / scene_change 镜头切换检测")
     fps: Optional[float] = Field(default=None, description="固定帧率模式的抽帧帧率")
     threshold: Optional[float] = Field(default=None, description="镜头切换检测的场景分数阈值")
+
+    @model_validator(mode="after")
+    def _check_method_fields(self) -> "SamplingInfo":
+        """method 与数值字段联动：固定帧率必须有 fps 且无 threshold，镜头检测反之。"""
+        if self.method == "fixed_fps":
+            if self.fps is None:
+                raise ValueError("fixed_fps 采样必须提供 fps")
+            if self.threshold is not None:
+                raise ValueError("fixed_fps 采样不应携带 threshold")
+        else:
+            if self.threshold is None:
+                raise ValueError("scene_change 采样必须提供 threshold")
+            if self.fps is not None:
+                raise ValueError("scene_change 采样不应携带 fps")
+        return self
 
 
 class FramesInfo(BaseModel):
