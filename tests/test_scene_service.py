@@ -1,6 +1,7 @@
 """镜头切换检测测试：showinfo 解析、真实合成视频边界检测、结构与上限校验。"""
 
 import json
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -161,7 +162,10 @@ def test_extract_scene_frames_respects_max_frames(
 
     get_settings.cache_clear()
 
-    monkeypatch.setattr(scene, "detect_scene_changes", lambda path, threshold: list(range(1000, 10000, 100)))
+    monkeypatch.setattr(
+        scene, "detect_scene_changes",
+        lambda path, threshold, max_boundaries=None: list(range(1000, 10000, 100)),
+    )
     monkeypatch.setattr(scene, "_require_tool", lambda name: name)
 
     def fake_extract(ffmpeg: str, video_path: Path, timestamp_ms: int, dest: Path) -> None:
@@ -175,6 +179,99 @@ def test_extract_scene_frames_respects_max_frames(
     assert info.frames[0].timestamp_ms == 0
     frames_json = json.loads((tmp_path / "frames" / VIDEO_ID / "frames.json").read_text(encoding="utf-8"))
     assert frames_json["count"] == 5
+
+
+@requires_ffmpeg
+def test_detect_scene_changes_respects_max_boundaries(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """检测阶段帧数上限：ffmpeg 输出达到上限即提前终止并告警，结果只含前 N 个边界。"""
+    video_file = tmp_path / "scenes.mp4"
+    _make_scene_test_video(video_file)
+
+    with caplog.at_level(logging.WARNING, logger=scene.logger.name):
+        boundaries = scene.detect_scene_changes(video_file, threshold=0.4, max_boundaries=1)
+
+    assert len(boundaries) == 1
+    assert abs(boundaries[0] - 2000) <= 500
+    assert any("上限" in record.message for record in caplog.records)
+
+
+def _jpeg_mean_brightness(frame_file: Path) -> float:
+    """用 ffmpeg 把 JPEG 解码为灰度裸流并计算平均亮度（0-255），避免引入 PIL 依赖。"""
+    result = subprocess.run(
+        ["ffmpeg", "-v", "error", "-i", str(frame_file), "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+        check=True,
+        capture_output=True,
+    )
+    data = result.stdout
+    assert data, f"解码 {frame_file} 未得到像素数据"
+    return sum(data) / len(data)
+
+
+@requires_ffmpeg
+def test_extract_scene_frames_boundary_colors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """边界帧内容校验：黑/白/黑分段视频的各帧平均亮度必须落在对应分段。
+
+    精确 seek 的回归保障：若抽帧仍用快速 seek 产生帧偏移，
+    边界帧会落到相邻分段导致亮度断言失败。
+    """
+    _isolate_storage(tmp_path, monkeypatch)
+    video_file = tmp_path / "scenes.mp4"
+    _make_scene_test_video(video_file)
+
+    info = scene.extract_scene_frames(VIDEO_ID, video_file)
+
+    assert info.count == 3
+    out_dir = tmp_path / "frames" / VIDEO_ID
+    brightness = [_jpeg_mean_brightness(out_dir / f"{f.frame_id}.jpg") for f in info.frames]
+    # 分段为黑/白/黑：起始帧与末边界帧为黑，中间边界帧为白
+    assert brightness[0] < 64
+    assert brightness[1] > 192
+    assert brightness[2] < 64
+
+
+@requires_ffmpeg
+def test_extract_scene_frames_no_scene_change(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """无镜头切换的纯色视频只产出起始帧。"""
+    _isolate_storage(tmp_path, monkeypatch)
+    video_file = tmp_path / "static.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=gray:size=320x240:rate=10:duration=2",
+            "-pix_fmt", "yuv420p",
+            str(video_file),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    info = scene.extract_scene_frames(VIDEO_ID, video_file)
+
+    assert info.count == 1
+    assert info.frames[0].timestamp_ms == 0
+    assert (tmp_path / "frames" / VIDEO_ID / f"{info.frames[0].frame_id}.jpg").is_file()
+
+
+@requires_ffmpeg
+def test_extract_scene_frames_tiny_video(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """极短视频（不足 1 秒）不报错，至少产出起始帧。"""
+    _isolate_storage(tmp_path, monkeypatch)
+    video_file = tmp_path / "tiny.mp4"
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", "color=black:size=320x240:rate=10:duration=0.2",
+            "-pix_fmt", "yuv420p",
+            str(video_file),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    info = scene.extract_scene_frames(VIDEO_ID, video_file)
+
+    assert info.count >= 1
+    assert info.frames[0].timestamp_ms == 0
 
 
 @requires_ffmpeg

@@ -11,6 +11,7 @@ import logging
 import re
 import subprocess
 from pathlib import Path
+from typing import Optional
 
 from app.core.config import get_settings
 from app.schemas.video import FrameInfo, FramesInfo, SamplingInfo
@@ -47,16 +48,28 @@ def _parse_showinfo_pts(stderr_text: str) -> list[int]:
     return sorted(set(timestamps_ms))
 
 
-def detect_scene_changes(video_path: Path, threshold: float) -> list[int]:
-    """检测镜头边界，返回按时间升序的毫秒时间戳列表（不含 0）。"""
+def detect_scene_changes(
+    video_path: Path,
+    threshold: float,
+    max_boundaries: Optional[int] = None,
+) -> list[int]:
+    """检测镜头边界，返回按时间升序的毫秒时间戳列表（不含 0）。
+
+    max_boundaries 用于检测阶段的资源保护：通过 -frames:v 让 ffmpeg 输出
+    足够边界后提前退出，避免高切换频率视频的 showinfo 输出撑爆内存或拖垮超时；
+    命中上限时结果可能被截断，记录告警。
+    """
     ffmpeg = _require_tool("ffmpeg")
+    command = [
+        ffmpeg,
+        "-i", str(video_path),
+        "-vf", f"select='gt(scene,{threshold})',showinfo",
+    ]
+    if max_boundaries is not None:
+        command += ["-frames:v", str(max_boundaries)]
+    command += ["-f", "null", "-"]
     result = subprocess.run(
-        [
-            ffmpeg,
-            "-i", str(video_path),
-            "-vf", f"select='gt(scene,{threshold})',showinfo",
-            "-f", "null", "-",
-        ],
+        command,
         capture_output=True,
         text=True,
         timeout=DETECT_TIMEOUT_SECONDS,
@@ -64,17 +77,37 @@ def detect_scene_changes(video_path: Path, threshold: float) -> list[int]:
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg 镜头检测失败: {result.stderr.strip()[-500:]}")
     # showinfo 的解析结果输出在 stderr
-    return [ms for ms in _parse_showinfo_pts(result.stderr) if ms > 0]
+    boundaries = [ms for ms in _parse_showinfo_pts(result.stderr) if ms > 0]
+    if max_boundaries is not None and len(boundaries) >= max_boundaries:
+        logger.warning(
+            "镜头边界数达到检测上限 %d，超出部分已被截断 video=%s",
+            max_boundaries, video_path,
+        )
+    return boundaries
+
+
+# 组合 seek 的预定位秒数：输入级 -ss 先跳到目标前该秒数处（关键帧粒度），
+# 输出级 -ss 再在解码流内精确补足，兼顾非均匀 GOP 视频的帧精度与解码耗时
+_PRE_SEEK_SECONDS = 2.0
 
 
 def _extract_single_frame(ffmpeg: str, video_path: Path, timestamp_ms: int, dest: Path) -> None:
-    """用 ffmpeg -ss 精确抽取指定毫秒时间戳的一帧。"""
+    """用组合 seek 精确抽取指定毫秒时间戳的一帧。
+
+    单纯输入级 -ss 在非均匀 GOP 视频上可能落在错误的关键帧区间造成帧偏移，
+    这里输入级 -ss 快速定位到目标前 _PRE_SEEK_SECONDS 秒，输出级 -ss 精确偏移，
+    保证抽到的帧与 timestamp_ms 严格对应。
+    """
+    target_seconds = timestamp_ms / 1000
+    seek_base = max(0.0, target_seconds - _PRE_SEEK_SECONDS)
+    seek_offset = target_seconds - seek_base
     result = subprocess.run(
         [
             ffmpeg,
             "-y",
-            "-ss", f"{timestamp_ms / 1000:.3f}",
+            "-ss", f"{seek_base:.3f}",
             "-i", str(video_path),
+            "-ss", f"{seek_offset:.3f}",
             "-frames:v", "1",
             "-q:v", "3",
             str(dest),
@@ -95,7 +128,8 @@ def extract_scene_frames(video_id: str, video_path: Path) -> FramesInfo:
     threshold = settings.scene_threshold
     max_frames = settings.scene_max_frames
 
-    boundaries = detect_scene_changes(video_path, threshold)
+    # 检测阶段即施加帧数上限（起始帧占 1 个名额），防止高切换频率视频撑爆内存
+    boundaries = detect_scene_changes(video_path, threshold, max_boundaries=max_frames - 1)
     # 起始帧固定纳入，作为首个镜头的代表帧
     timestamps = [0, *boundaries]
     if len(timestamps) > max_frames:
