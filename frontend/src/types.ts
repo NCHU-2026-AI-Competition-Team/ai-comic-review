@@ -4,11 +4,10 @@ export type SamplingMode = 'fixed_fps' | 'scene'
 
 export type SamplingMethod = 'fixed_fps' | 'scene_change'
 
-export interface SamplingInfo {
-  method: SamplingMethod
-  fps: number | null
-  threshold: number | null
-}
+// 与后端 SamplingInfo 的 method 字段联动校验一一对应：fps 与 threshold 互斥
+export type SamplingInfo =
+  | { method: 'fixed_fps'; fps: number; threshold: null }
+  | { method: 'scene_change'; fps: null; threshold: number }
 
 export interface VideoMetadata {
   duration: number | null

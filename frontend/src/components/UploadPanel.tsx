@@ -75,7 +75,7 @@ export default function UploadPanel({ submitting, onSubmit }: Props) {
       <label className="sampling-select">
         采样模式
         <select value={sampling} onChange={(e) => setSampling(e.target.value as SamplingMode)}>
-          <option value="fixed_fps">固定帧率 2FPS</option>
+          <option value="fixed_fps">固定帧率</option>
           <option value="scene">镜头切换检测</option>
         </select>
       </label>
