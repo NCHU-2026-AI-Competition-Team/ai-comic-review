@@ -13,7 +13,7 @@ flowchart LR
 
     subgraph 后端[后端 FastAPI :8000]
         ROUTE[api 路由层<br/>health.py / videos.py]
-        SVC[services 业务层<br/>video.py / registry.py]
+        SVC[services 业务层<br/>video/ 包 / registry.py]
         SCHEMA[schemas 数据模型<br/>video.py / events.py]
         CFG[core/config.py 配置]
     end
@@ -52,37 +52,43 @@ backend/app/
 │   ├── health.py      #   GET /api/health
 │   └── videos.py      #   视频上传与结果查询（/api/videos ...）
 ├── services/          # 业务层：不感知 HTTP
-│   ├── video.py       #   ffprobe 元数据解析、ffmpeg 抽帧、frames.json 落盘
+│   ├── video/         #   视频处理包：__init__.py（ffprobe 元数据、固定帧率抽帧、frames.json 落盘、流程编排）
+│   │   └── scene.py   #   镜头切换检测（scene_change 采样模式）
 │   └── registry.py    #   任务记录（VideoJob）的文件注册表，接口与存储解耦，后续可替换为 PostgreSQL
 ├── schemas/           # 数据模型（Pydantic）
-│   ├── video.py       #   VideoJob / VideoMetadata / FramesInfo / FrameInfo / VideoUploadResponse
+│   ├── video.py       #   VideoJob / VideoMetadata / FramesInfo / FrameInfo / SamplingInfo / VideoUploadResponse
 │   └── events.py      #   TimelineEvent 统一时间线事件（预留，供 OCR/ASR/视觉/VLM 归一产出）
 └── core/
     └── config.py      # Settings（pydantic-settings），lru_cache 单例 get_settings()
 ```
 
-分层依赖方向：`api` → `services` → `schemas` / `core`。路由层只做校验与编排；`services/video.py` 通过 `subprocess.run` 以参数列表形式调用 ffprobe/ffmpeg（无 shell）；`services/registry.py` 将任务记录以 `job.json` 落盘，对上层屏蔽存储细节。
+分层依赖方向：`api` → `services` → `schemas` / `core`。路由层只做校验与编排；`services/video` 包通过 `subprocess.run` 以参数列表形式调用 ffprobe/ffmpeg（无 shell）；`services/registry.py` 将任务记录以 `job.json` 落盘，对上层屏蔽存储细节。
 
 ## 视频上传与抽帧流程
 
 ```
-POST /api/videos (multipart, 字段 file)
+POST /api/videos (multipart, 字段 file，可选字段 sampling=fixed_fps|scene，默认 fixed_fps)
   │
-  ├─ 1. 扩展名校验：仅 .mp4/.mov/.mkv，否则 400
+  ├─ 1. 扩展名校验：仅 .mp4/.mov/.mkv，否则 400；sampling 非法值返回 400
   ├─ 2. 生成 video_id（uuid4），流式写入 storage/uploads/{video_id}{ext}
   │      超过 MAX_UPLOAD_SIZE_MB 时删除部分文件并返回 413
   ├─ 3. registry.save_job：创建任务记录 storage/uploads/{video_id}/job.json
-  │      （status=processing）
-  ├─ 4. 同步触发 app.services.video.process_video(video_id)：
+  │      （status=processing，记录 sampling 模式）
+  ├─ 4. 同步触发 app.services.video.process_video(video_id, sampling)：
   │      a. ffprobe -show_format -show_streams → VideoMetadata，写回任务记录
-  │      b. ffmpeg -vf fps={FRAME_EXTRACTION_FPS} 抽帧到
-  │         storage/frames/{video_id}/frame_%06d.jpg，并写 frames.json
-  │         （帧清单：frame_id、timestamp_ms、可读时间戳、以 /api/videos/ 开头的访问路径）
+  │      b. 按 sampling 模式抽帧到 storage/frames/{video_id}/ 并写 frames.json
+  │         （帧清单：sampling 信息、frame_id、timestamp_ms、可读时间戳、
+  │         以 /api/videos/ 开头的访问路径）
   │      c. 任务状态置为 processed
   │      · 处理模块缺失（ImportError）时保持 processing；其他异常置为 failed
   │        且上传接口返回 500
-  └─ 5. 返回 201 VideoUploadResponse（video_id、status、metadata、frames）
+  └─ 5. 返回 201 VideoUploadResponse（video_id、status、sampling、metadata、frames）
 ```
+
+两种采样模式：
+
+- `fixed_fps`（默认）：`ffmpeg -vf fps={FRAME_EXTRACTION_FPS}` 固定帧率抽帧，frames.json 的 sampling 记录 `{method: "fixed_fps", fps}`。
+- `scene`（镜头切换检测）：先以 `ffmpeg -vf select='gt(scene,{SCENE_THRESHOLD})',showinfo -f null -` 跑一遍全片，从 showinfo 输出用正则解析命中帧的 pts_time 得到毫秒级镜头边界；再对每个边界用 `ffmpeg -ss` 精确截取一帧，并额外保留 t=0 起始帧作为首个镜头的代表帧。frames.json 的 sampling 记录 `{method: "scene_change", threshold}`。镜头数量超过 `SCENE_MAX_FRAMES`（默认 500）时截断并记警告日志，防止异常视频产生海量帧。ffmpeg 缺失、检测失败或超时均明确抛错，任务置为 failed。
 
 结果查询：
 
@@ -94,7 +100,7 @@ POST /api/videos (multipart, 字段 file)
 
 单页应用（`App.tsx`），以 phase 状态机驱动：`idle → uploading → processing → processed / failed / error`。
 
-1. `UploadPanel`：拖拽或点选单个视频，前端先做扩展名预校验，提交时 `uploadVideo()` 发起 `POST /api/videos`。
+1. `UploadPanel`：拖拽或点选单个视频并选择采样模式（固定帧率 2FPS / 镜头切换检测），前端先做扩展名预校验，提交时 `uploadVideo()` 携带 sampling 字段发起 `POST /api/videos`。
 2. 上传响应若直接是 `processed` 则展示结果；若为 `processing` 则每 2 秒轮询 `GET /api/videos/{video_id}`，直到 `processed` / `failed`。
 3. 成功后调用 `GET .../frames` 拉取帧清单（仅 404 未生成时退回任务记录中携带的帧信息，500/网络异常等错误直接向用户展示），`VideoInfoPanel` 展示元数据，`FramesGrid` 以帧图片 URL（`GET .../frames/{filename}`）渲染帧网格。
 4. `failed / error` 状态展示错误信息并允许返回重新上传。
@@ -119,7 +125,7 @@ storage/
 
 `ai/` 下五个模块目前均只有 README 占位，无任何实现代码：
 
-- `ai/video`：视频元数据解析与抽帧（当前该能力由后端 `app/services/video.py` 承担）
+- `ai/video`：视频元数据解析与抽帧（当前该能力由后端 `app/services/video` 包承担）
 - `ai/ocr`：画面文字识别
 - `ai/asr`：语音转写
 - `ai/vlm`：视觉语言大模型理解
@@ -138,6 +144,8 @@ storage/
 | `backend_port` | `BACKEND_PORT` | `8000` | 后端监听端口 |
 | `storage_dir` | `STORAGE_DIR` | `storage` | 存储目录，相对路径基于仓库根目录 |
 | `frame_extraction_fps` | `FRAME_EXTRACTION_FPS` | `2.0` | 抽帧帧率，必须大于 0，非法值在启动时即报错 |
+| `scene_threshold` | `SCENE_THRESHOLD` | `0.4` | 镜头切换检测的场景分数阈值，必须在 (0, 1) 区间 |
+| `scene_max_frames` | `SCENE_MAX_FRAMES` | `500` | 镜头切换检测的最大抽帧数，超出部分截断 |
 | `max_upload_size_mb` | `MAX_UPLOAD_SIZE_MB` | `500` | 上传文件大小上限（MB） |
 
 其他相关配置：CORS 允许来源在 `main.py` 中固定为 `http://localhost:5173` / `http://127.0.0.1:5173`（Vite 开发服务器）；前端 API 地址为 `VITE_API_BASE_URL`（默认空串，走 Vite proxy）。

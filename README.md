@@ -7,8 +7,9 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 - 视频上传：支持 `.mp4` / `.mov` / `.mkv`，单个文件，大小上限默认 500 MB（可配置）
 - 元数据解析：基于 ffprobe 提取时长、分辨率、帧率、编码格式、码率
 - 关键帧抽取：基于 ffmpeg 按固定帧率抽帧，生成帧图片与 `frames.json` 帧清单（含毫秒级时间戳）
+- 镜头切换检测：可选 scene 采样模式，基于 ffmpeg 场景分数识别镜头边界并逐边界精确抽帧（阈值与帧数上限可配置）
 - 状态查询：查询视频任务状态（processing / processed / failed）、帧清单与帧图片
-- 前端页面：拖拽/点选上传、处理状态轮询、元数据与帧网格展示
+- 前端页面：拖拽/点选上传、采样模式选择、处理状态轮询、元数据与帧网格展示
 
 ## 技术栈
 
@@ -31,7 +32,7 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 │   │   ├── api/            # 路由层：health.py、videos.py
 │   │   ├── core/           # 配置：config.py（pydantic-settings）
 │   │   ├── schemas/        # 数据模型：video.py、events.py（时间线事件，预留）
-│   │   ├── services/       # 业务层：video.py（ffprobe/抽帧）、registry.py（任务记录落盘）
+│   │   ├── services/       # 业务层：video/（ffprobe/固定帧率抽帧/镜头切换检测）、registry.py（任务记录落盘）
 │   │   └── main.py         # FastAPI 应用入口
 │   └── requirements.txt
 ├── frontend/
@@ -112,4 +113,6 @@ python -m pytest tests/ -v
 | `BACKEND_HOST` / `BACKEND_PORT` | `127.0.0.1` / `8000` | 后端监听地址与端口 |
 | `STORAGE_DIR` | `storage` | 存储目录（相对路径基于仓库根目录解析） |
 | `FRAME_EXTRACTION_FPS` | `2.0` | 抽帧帧率 |
+| `SCENE_THRESHOLD` | `0.4` | 镜头切换检测的场景分数阈值（0, 1 区间） |
+| `SCENE_MAX_FRAMES` | `500` | 镜头切换检测的最大抽帧数，超出截断 |
 | `MAX_UPLOAD_SIZE_MB` | `500` | 上传文件大小上限（MB） |
