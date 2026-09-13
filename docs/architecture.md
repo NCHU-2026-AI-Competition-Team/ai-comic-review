@@ -86,7 +86,7 @@ POST /api/videos (multipart, 字段 file)
 
 结果查询：
 
-- `GET /api/videos/{video_id}` → 任务记录（VideoJob）。`video_id` 先经格式校验（36 位十六进制/连字符），非法一律 404，防止路径穿越；任务记录文件损坏时返回 500。
+- `GET /api/videos/{video_id}` → 任务记录（VideoJob）。`video_id` 先经 `uuid.UUID` 严格校验，非法格式返回 400，防止路径穿越；任务记录文件损坏时返回 500。
 - `GET /api/videos/{video_id}/frames` → 读取 `frames/{video_id}/frames.json`；未生成 404，文件损坏 500。
 - `GET /api/videos/{video_id}/frames/{filename}` → 帧图片；文件名必须为纯文件名且后缀属于 .jpg/.jpeg/.png，否则 404。
 

@@ -148,7 +148,8 @@ def test_get_video_corrupted_job_returns_500(client: TestClient) -> None:
 
 def test_get_video_rejects_invalid_id_format(client: TestClient) -> None:
     response = client.get("/api/videos/not-a-valid-id")
-    assert response.status_code == 404
+    assert response.status_code == 400
+    assert "video_id 格式非法" in response.json()["detail"]
 
 
 def test_get_frames_not_generated(client: TestClient) -> None:

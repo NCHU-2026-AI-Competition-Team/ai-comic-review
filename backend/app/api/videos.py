@@ -2,7 +2,6 @@
 
 import json
 import logging
-import re
 import uuid
 from pathlib import Path
 
@@ -19,14 +18,14 @@ router = APIRouter(prefix="/videos", tags=["videos"])
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv"}
 ALLOWED_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
-VIDEO_ID_PATTERN = re.compile(r"^[0-9a-fA-F-]{36}$")
 
 
 def _validate_video_id(video_id: str) -> str:
-    """校验 video_id 格式，防止路径穿越。"""
-    if not VIDEO_ID_PATTERN.match(video_id):
-        raise HTTPException(status_code=404, detail="视频不存在")
-    return video_id
+    """校验 video_id 为合法 UUID，防止路径穿越；非法格式返回 400。"""
+    try:
+        return str(uuid.UUID(video_id))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="video_id 格式非法") from None
 
 
 def _try_process(video_id: str) -> None:
