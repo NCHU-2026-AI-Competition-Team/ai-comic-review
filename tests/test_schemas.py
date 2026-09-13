@@ -7,18 +7,20 @@ from app.schemas.events import TimelineEvent
 from app.schemas.video import (
     FrameInfo,
     FramesInfo,
+    SamplingInfo,
     VideoMetadata,
     VideoUploadResponse,
 )
 
 
 def test_video_upload_response_defaults() -> None:
-    resp = VideoUploadResponse(video_id="vid-1", filename="demo.mp4", status="processing")
+    resp = VideoUploadResponse(video_id="vid-1", filename="demo.mp4", status="processing", sampling="fixed_fps")
     assert resp.metadata is None
     assert resp.frames is None
     data = resp.model_dump(mode="json")
     assert data["status"] == "processing"
     assert data["video_id"] == "vid-1"
+    assert data["sampling"] == "fixed_fps"
 
 
 def test_video_upload_response_full() -> None:
@@ -26,8 +28,10 @@ def test_video_upload_response_full() -> None:
         video_id="vid-2",
         filename="demo.mov",
         status="processed",
+        sampling="scene",
         metadata=VideoMetadata(duration=12.5, width=1920, height=1080, fps=24.0),
         frames=FramesInfo(
+            sampling=SamplingInfo(method="scene_change", threshold=0.4),
             count=1,
             frames=[FrameInfo(frame_id="000001", timestamp_ms=0, timestamp="00:00:00.000", path="/api/videos/vid-2/frames/000001.jpg")],
         ),
@@ -35,6 +39,13 @@ def test_video_upload_response_full() -> None:
     assert resp.metadata is not None and resp.metadata.codec is None
     assert resp.frames is not None and resp.frames.count == 1
     assert resp.frames.frames[0].timestamp_ms == 0
+    assert resp.frames.sampling.method == "scene_change"
+    assert resp.frames.sampling.threshold == 0.4
+
+
+def test_sampling_info_method_validation() -> None:
+    with pytest.raises(ValidationError):
+        SamplingInfo(method="unknown")  # type: ignore[arg-type]
 
 
 def test_video_upload_response_invalid_status() -> None:

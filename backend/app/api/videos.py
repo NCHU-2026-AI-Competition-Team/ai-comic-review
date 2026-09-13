@@ -5,11 +5,11 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, UploadFile
+from fastapi import APIRouter, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
-from app.schemas.video import FramesInfo, VideoJob, VideoUploadResponse
+from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
 from app.services import registry
 
 logger = logging.getLogger(__name__)
@@ -18,6 +18,7 @@ router = APIRouter(prefix="/videos", tags=["videos"])
 
 ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv"}
 ALLOWED_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
+ALLOWED_SAMPLING_MODES = {"fixed_fps", "scene"}
 
 
 def _validate_video_id(video_id: str) -> str:
@@ -28,7 +29,17 @@ def _validate_video_id(video_id: str) -> str:
         raise HTTPException(status_code=400, detail="video_id 格式非法") from None
 
 
-def _try_process(video_id: str) -> None:
+def _validate_sampling(sampling: str) -> SamplingMode:
+    """校验采样模式取值，非法值返回 400。"""
+    if sampling not in ALLOWED_SAMPLING_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"不支持的采样模式 '{sampling}'，仅允许 {sorted(ALLOWED_SAMPLING_MODES)}",
+        )
+    return sampling  # type: ignore[return-value]
+
+
+def _try_process(video_id: str, sampling: SamplingMode) -> None:
     """尝试触发视频处理流水线。
 
     app.services.video.process_video 由视频处理服务提供，
@@ -40,7 +51,7 @@ def _try_process(video_id: str) -> None:
         logger.info("视频处理模块尚未接入，video_id=%s 保持 processing", video_id)
         return
     try:
-        process_video(video_id)
+        process_video(video_id, sampling=sampling)
     except Exception as exc:
         logger.exception("视频处理失败 video_id=%s", video_id)
         registry.update_job(video_id, status="failed", error=str(exc))
@@ -64,7 +75,7 @@ def _save_upload(file: UploadFile, dest: Path, max_bytes: int) -> None:
 
 
 @router.post("", response_model=VideoUploadResponse, status_code=201)
-def upload_video(file: UploadFile) -> VideoUploadResponse:
+def upload_video(file: UploadFile, sampling: str = Form("fixed_fps")) -> VideoUploadResponse:
     """上传视频：校验格式、保存原始文件、落盘任务记录并尝试触发处理。"""
     original_name = file.filename or ""
     ext = Path(original_name).suffix.lower()
@@ -73,6 +84,7 @@ def upload_video(file: UploadFile) -> VideoUploadResponse:
             status_code=400,
             detail=f"不支持的视频格式 '{ext}'，仅允许 {sorted(ALLOWED_EXTENSIONS)}",
         )
+    sampling_mode = _validate_sampling(sampling)
 
     settings = get_settings()
     video_id = str(uuid.uuid4())
@@ -80,10 +92,10 @@ def upload_video(file: UploadFile) -> VideoUploadResponse:
     settings.uploads_path.mkdir(parents=True, exist_ok=True)
     _save_upload(file, dest, max_bytes=settings.max_upload_size_mb * 1024 * 1024)
 
-    job = registry.save_job(VideoJob(video_id=video_id, filename=original_name))
+    job = registry.save_job(VideoJob(video_id=video_id, filename=original_name, sampling=sampling_mode))
 
     try:
-        _try_process(video_id)
+        _try_process(video_id, sampling_mode)
     except HTTPException:
         raise
     except Exception as exc:
@@ -94,6 +106,7 @@ def upload_video(file: UploadFile) -> VideoUploadResponse:
         video_id=job.video_id,
         filename=job.filename,
         status=job.status,
+        sampling=job.sampling,
         metadata=job.metadata,
         frames=job.frames,
     )

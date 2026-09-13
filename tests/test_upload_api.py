@@ -39,7 +39,7 @@ def _upload(client: TestClient, filename: str = "clip.mp4", content: bytes = FAK
 def test_upload_success_with_processing_pipeline(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
     """正常上传：处理流水线完成后返回 processed 状态与元数据。"""
 
-    def fake_process(video_id: str) -> None:
+    def fake_process(video_id: str, sampling: str = "fixed_fps") -> None:
         registry.update_job(video_id, status="processed")
 
     monkeypatch.setattr(video_service, "process_video", fake_process)
@@ -49,12 +49,72 @@ def test_upload_success_with_processing_pipeline(client: TestClient, monkeypatch
     payload = response.json()
     assert payload["filename"] == "clip.mp4"
     assert payload["status"] == "processed"
+    assert payload["sampling"] == "fixed_fps"
 
     settings = get_settings()
     video_id = payload["video_id"]
     assert (settings.uploads_path / f"{video_id}.mp4").is_file()
     job = registry.get_job(video_id)
     assert job is not None and job.status == "processed"
+
+
+def test_upload_default_sampling_is_fixed_fps(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """不传 sampling 时默认 fixed_fps，并透传给处理流水线。"""
+    received: list[str] = []
+
+    def fake_process(video_id: str, sampling: str = "fixed_fps") -> None:
+        received.append(sampling)
+        registry.update_job(video_id, status="processed")
+
+    monkeypatch.setattr(video_service, "process_video", fake_process)
+
+    response = _upload(client)
+    assert response.status_code == 201, response.text
+    assert response.json()["sampling"] == "fixed_fps"
+    assert received == ["fixed_fps"]
+
+
+def test_upload_accepts_scene_sampling(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """sampling=scene 上传成功，任务记录与 GET /api/videos/{id} 均可见采样模式。"""
+    received: list[str] = []
+
+    def fake_process(video_id: str, sampling: str = "fixed_fps") -> None:
+        received.append(sampling)
+        registry.update_job(video_id, status="processed")
+
+    monkeypatch.setattr(video_service, "process_video", fake_process)
+
+    response = client.post(
+        "/api/videos",
+        files={"file": ("clip.mp4", io.BytesIO(FAKE_MP4), "video/mp4")},
+        data={"sampling": "scene"},
+    )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["sampling"] == "scene"
+    assert received == ["scene"]
+
+    video_id = payload["video_id"]
+    job = registry.get_job(video_id)
+    assert job is not None and job.sampling == "scene"
+
+    get_response = client.get(f"/api/videos/{video_id}")
+    assert get_response.status_code == 200
+    assert get_response.json()["sampling"] == "scene"
+
+
+def test_upload_rejects_invalid_sampling(client: TestClient) -> None:
+    """非法 sampling 值返回 4xx，且不落盘任务记录。"""
+    response = client.post(
+        "/api/videos",
+        files={"file": ("clip.mp4", io.BytesIO(FAKE_MP4), "video/mp4")},
+        data={"sampling": "auto"},
+    )
+    assert response.status_code == 400
+    assert "不支持的采样模式" in response.json()["detail"]
+
+    settings = get_settings()
+    assert list(settings.uploads_path.glob("*/job.json")) == []
 
 
 def test_upload_keeps_processing_when_pipeline_missing(
@@ -76,7 +136,7 @@ def test_upload_returns_500_when_processing_fails(
 ) -> None:
     """处理流水线抛异常时返回 500，任务记录标记为 failed。"""
 
-    def failing_process(video_id: str) -> None:
+    def failing_process(video_id: str, sampling: str = "fixed_fps") -> None:
         raise RuntimeError("模拟处理失败")
 
     monkeypatch.setattr(video_service, "process_video", failing_process)
@@ -163,6 +223,7 @@ def test_get_frames_success(client: TestClient) -> None:
     (frames_dir / "frames.json").write_text(
         json.dumps(
             {
+                "sampling": {"method": "fixed_fps", "fps": 2.0, "threshold": None},
                 "count": 1,
                 "frames": [
                     {

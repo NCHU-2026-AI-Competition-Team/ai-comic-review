@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     backend_port: int = 8000
     storage_dir: str = "storage"
     frame_extraction_fps: float = Field(default=2.0, gt=0, description="抽帧帧率，必须大于 0")
+    scene_threshold: float = Field(default=0.4, gt=0, lt=1, description="镜头切换检测的场景分数阈值，必须在 (0, 1) 区间")
+    scene_max_frames: int = Field(default=500, gt=0, description="镜头切换检测的最大抽帧数，超出部分截断，防止异常视频产生海量帧")
     max_upload_size_mb: int = 500
 
     @property

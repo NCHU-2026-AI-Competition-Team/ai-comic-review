@@ -7,6 +7,12 @@ from pydantic import BaseModel, Field
 
 VideoStatus = Literal["processed", "failed", "processing"]
 
+# 上传时可选的采样模式：固定帧率 / 镜头切换检测
+SamplingMode = Literal["fixed_fps", "scene"]
+
+# frames.json 中记录的采样方式：与 SamplingMode 对应，scene 模式落盘为 scene_change
+SamplingMethod = Literal["fixed_fps", "scene_change"]
+
 
 class VideoMetadata(BaseModel):
     """视频元数据，当前阶段全部可选，由视频处理服务（app.services.video）填充。"""
@@ -28,9 +34,18 @@ class FrameInfo(BaseModel):
     path: str = Field(description="帧图片的访问路径，以 /api/videos/ 开头，可直接 GET 访问")
 
 
+class SamplingInfo(BaseModel):
+    """采样方式描述：固定帧率记录 fps，镜头切换检测记录 threshold。"""
+
+    method: SamplingMethod = Field(description="采样方式：fixed_fps 固定帧率 / scene_change 镜头切换检测")
+    fps: Optional[float] = Field(default=None, description="固定帧率模式的抽帧帧率")
+    threshold: Optional[float] = Field(default=None, description="镜头切换检测的场景分数阈值")
+
+
 class FramesInfo(BaseModel):
     """抽帧结果汇总。"""
 
+    sampling: SamplingInfo = Field(description="本次抽帧使用的采样方式")
     count: int = Field(ge=0, description="帧数量")
     frames: list[FrameInfo] = Field(default_factory=list, description="帧列表")
 
@@ -41,6 +56,7 @@ class VideoUploadResponse(BaseModel):
     video_id: str
     filename: str
     status: VideoStatus
+    sampling: SamplingMode
     metadata: Optional[VideoMetadata] = None
     frames: Optional[FramesInfo] = None
 
@@ -51,6 +67,7 @@ class VideoJob(BaseModel):
     video_id: str
     filename: str
     status: VideoStatus = "processing"
+    sampling: SamplingMode = "fixed_fps"
     error: Optional[str] = Field(default=None, description="处理失败时的错误信息")
     metadata: Optional[VideoMetadata] = None
     frames: Optional[FramesInfo] = None

@@ -1,7 +1,8 @@
-"""视频处理流水线：ffprobe 元数据解析与固定帧率抽帧。
+"""视频处理流水线：ffprobe 元数据解析与抽帧。
 
 process_video 由 app.api.videos 在上传成功后触发，
 结果（metadata、frames）写回任务记录，帧清单落盘为 frames.json。
+固定帧率抽帧由本模块实现，镜头切换检测见 app.services.video.scene。
 """
 
 import json
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.config import get_settings
-from app.schemas.video import FrameInfo, FramesInfo, VideoMetadata
+from app.schemas.video import FrameInfo, FramesInfo, SamplingInfo, SamplingMode, VideoMetadata
 from app.services import registry
 
 logger = logging.getLogger(__name__)
@@ -158,7 +159,11 @@ def extract_frames(video_id: str, video_path: Path, fps: float) -> FramesInfo:
                 path=f"/api/videos/{video_id}/frames/{frame_file.name}",
             )
         )
-    info = FramesInfo(count=len(frames), frames=frames)
+    info = FramesInfo(
+        sampling=SamplingInfo(method="fixed_fps", fps=fps),
+        count=len(frames),
+        frames=frames,
+    )
     (out_dir / FRAMES_JSON).write_text(
         json.dumps(info.model_dump(mode="json"), ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -175,8 +180,8 @@ def _find_uploaded_file(video_id: str) -> Path:
     raise RuntimeError(f"找不到 video_id={video_id} 对应的上传文件")
 
 
-def process_video(video_id: str) -> None:
-    """处理已上传的视频：解析元数据、抽帧并更新任务状态。"""
+def process_video(video_id: str, sampling: SamplingMode = "fixed_fps") -> None:
+    """处理已上传的视频：解析元数据、按采样模式抽帧并更新任务状态。"""
     settings = get_settings()
     video_path = _find_uploaded_file(video_id)
 
@@ -184,6 +189,12 @@ def process_video(video_id: str) -> None:
     registry.update_job(video_id, metadata=metadata)
     logger.info("元数据解析完成 video_id=%s metadata=%s", video_id, metadata)
 
-    frames = extract_frames(video_id, video_path, fps=settings.frame_extraction_fps)
+    if sampling == "scene":
+        # 延迟导入避免包内循环依赖（scene 复用本模块的 ffmpeg 工具函数）
+        from app.services.video.scene import extract_scene_frames
+
+        frames = extract_scene_frames(video_id, video_path)
+    else:
+        frames = extract_frames(video_id, video_path, fps=settings.frame_extraction_fps)
     registry.update_job(video_id, status="processed", frames=frames)
-    logger.info("抽帧完成 video_id=%s count=%d", video_id, frames.count)
+    logger.info("抽帧完成 video_id=%s sampling=%s count=%d", video_id, sampling, frames.count)
