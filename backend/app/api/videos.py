@@ -104,7 +104,10 @@ def upload_video(file: UploadFile) -> VideoUploadResponse:
 def get_video(video_id: str) -> VideoJob:
     """查询视频任务的当前状态与已有结果。"""
     _validate_video_id(video_id)
-    job = registry.get_job(video_id)
+    try:
+        job = registry.get_job(video_id)
+    except registry.JobCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="任务记录文件损坏") from exc
     if job is None:
         raise HTTPException(status_code=404, detail="视频不存在")
     return job

@@ -17,6 +17,10 @@ logger = logging.getLogger(__name__)
 JOB_FILENAME = "job.json"
 
 
+class JobCorruptedError(RuntimeError):
+    """任务记录文件存在但内容损坏（非法 JSON 或字段校验失败）。"""
+
+
 def _job_dir(video_id: str) -> Path:
     return get_settings().uploads_path / video_id
 
@@ -37,7 +41,7 @@ def save_job(job: VideoJob) -> VideoJob:
 
 
 def get_job(video_id: str) -> Optional[VideoJob]:
-    """读取任务记录，不存在时返回 None。"""
+    """读取任务记录：文件不存在返回 None；文件损坏抛出 JobCorruptedError。"""
     path = _job_path(video_id)
     if not path.is_file():
         return None
@@ -46,7 +50,7 @@ def get_job(video_id: str) -> Optional[VideoJob]:
         return VideoJob.model_validate(data)
     except (json.JSONDecodeError, ValueError) as exc:
         logger.error("任务记录损坏 video_id=%s: %s", video_id, exc)
-        return None
+        raise JobCorruptedError(f"任务记录文件损坏 video_id={video_id}") from exc
 
 
 def update_job(video_id: str, **fields: object) -> Optional[VideoJob]:

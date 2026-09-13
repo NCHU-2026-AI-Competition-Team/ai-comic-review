@@ -86,7 +86,7 @@ POST /api/videos (multipart, 字段 file)
 
 结果查询：
 
-- `GET /api/videos/{video_id}` → 任务记录（VideoJob）。`video_id` 先经格式校验（36 位十六进制/连字符），非法一律 404，防止路径穿越。
+- `GET /api/videos/{video_id}` → 任务记录（VideoJob）。`video_id` 先经格式校验（36 位十六进制/连字符），非法一律 404，防止路径穿越；任务记录文件损坏时返回 500。
 - `GET /api/videos/{video_id}/frames` → 读取 `frames/{video_id}/frames.json`；未生成 404，文件损坏 500。
 - `GET /api/videos/{video_id}/frames/{filename}` → 帧图片；文件名必须为纯文件名且后缀属于 .jpg/.jpeg/.png，否则 404。
 
@@ -96,7 +96,7 @@ POST /api/videos (multipart, 字段 file)
 
 1. `UploadPanel`：拖拽或点选单个视频，前端先做扩展名预校验，提交时 `uploadVideo()` 发起 `POST /api/videos`。
 2. 上传响应若直接是 `processed` 则展示结果；若为 `processing` 则每 2 秒轮询 `GET /api/videos/{video_id}`，直到 `processed` / `failed`。
-3. 成功后调用 `GET .../frames` 拉取帧清单（失败时退回上传响应中携带的帧信息），`VideoInfoPanel` 展示元数据，`FramesGrid` 以帧图片 URL（`GET .../frames/{filename}`）渲染帧网格。
+3. 成功后调用 `GET .../frames` 拉取帧清单（仅 404 未生成时退回任务记录中携带的帧信息，500/网络异常等错误直接向用户展示），`VideoInfoPanel` 展示元数据，`FramesGrid` 以帧图片 URL（`GET .../frames/{filename}`）渲染帧网格。
 4. `failed / error` 状态展示错误信息并允许返回重新上传。
 
 ## 存储布局

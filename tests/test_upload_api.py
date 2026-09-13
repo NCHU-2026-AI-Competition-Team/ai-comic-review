@@ -135,6 +135,17 @@ def test_get_video_not_found(client: TestClient) -> None:
     assert response.status_code == 404
 
 
+def test_get_video_corrupted_job_returns_500(client: TestClient) -> None:
+    """job.json 损坏时返回 500 并提示任务记录文件损坏，而不是当作 404。"""
+    job_dir = get_settings().uploads_path / VALID_VIDEO_ID
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text("{ 不是合法 JSON", encoding="utf-8")
+
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}")
+    assert response.status_code == 500
+    assert "任务记录文件损坏" in response.json()["detail"]
+
+
 def test_get_video_rejects_invalid_id_format(client: TestClient) -> None:
     response = client.get("/api/videos/not-a-valid-id")
     assert response.status_code == 404

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import UploadPanel from './components/UploadPanel'
 import VideoInfoPanel from './components/VideoInfoPanel'
 import FramesGrid from './components/FramesGrid'
-import { getFrames, getVideo, uploadVideo } from './api/videos'
+import { ApiError, getFrames, getVideo, uploadVideo } from './api/videos'
 import type { FramesInfo, VideoJob, VideoUploadResponse } from './types'
 
 type Phase = 'idle' | 'uploading' | 'processing' | 'processed' | 'failed' | 'error'
@@ -35,9 +35,15 @@ export default function App() {
   const loadFrames = useCallback(async (videoId: string, fallback: FramesInfo | null) => {
     try {
       setFramesInfo(await getFrames(videoId))
-    } catch {
-      // 帧清单接口尚未就绪时退回任务记录中携带的帧信息
-      setFramesInfo(fallback)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        // 帧清单尚未生成时退回任务记录中携带的帧信息
+        setFramesInfo(fallback)
+        return
+      }
+      // 500 / 网络异常 / frames.json 损坏等明确告知用户，不再静默回退
+      setError(err instanceof Error ? err.message : '帧清单加载失败')
+      setPhase('error')
     }
   }, [])
 
