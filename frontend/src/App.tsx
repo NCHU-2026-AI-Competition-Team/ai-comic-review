@@ -3,7 +3,7 @@ import UploadPanel from './components/UploadPanel'
 import VideoInfoPanel from './components/VideoInfoPanel'
 import FramesGrid from './components/FramesGrid'
 import { ApiError, getFrames, getVideo, uploadVideo } from './api/videos'
-import type { FramesInfo, VideoJob, VideoUploadResponse } from './types'
+import type { FramesInfo, SamplingMode, VideoJob, VideoUploadResponse } from './types'
 
 type Phase = 'idle' | 'uploading' | 'processing' | 'processed' | 'failed' | 'error'
 
@@ -14,6 +14,7 @@ function toJob(upload: VideoUploadResponse): VideoJob {
     video_id: upload.video_id,
     filename: upload.filename,
     status: upload.status,
+    sampling: upload.sampling,
     error: null,
     metadata: upload.metadata,
     frames: upload.frames,
@@ -84,12 +85,12 @@ export default function App() {
   )
 
   const handleSubmit = useCallback(
-    async (file: File) => {
+    async (file: File, sampling: SamplingMode) => {
       setPhase('uploading')
       setError(null)
       setFramesInfo(null)
       try {
-        const upload = await uploadVideo(file)
+        const upload = await uploadVideo(file, sampling)
         const initial = toJob(upload)
         setJob(initial)
         if (initial.status === 'processed') {
@@ -163,6 +164,7 @@ export default function App() {
             <VideoInfoPanel
               filename={job.filename}
               metadata={job.metadata}
+              sampling={framesInfo?.sampling ?? job.frames?.sampling ?? null}
               frameCount={framesInfo?.count ?? job.frames?.count ?? null}
             />
             {framesInfo && <FramesGrid videoId={job.video_id} framesInfo={framesInfo} />}

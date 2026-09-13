@@ -1,8 +1,9 @@
 import { useCallback, useRef, useState } from 'react'
+import type { SamplingMode } from '../types'
 
 interface Props {
   submitting: boolean
-  onSubmit: (file: File) => void
+  onSubmit: (file: File, sampling: SamplingMode) => void
 }
 
 const ACCEPTED_EXTENSIONS = ['.mp4', '.mov', '.mkv']
@@ -20,6 +21,7 @@ function isAccepted(file: File): boolean {
 
 export default function UploadPanel({ submitting, onSubmit }: Props) {
   const [file, setFile] = useState<File | null>(null)
+  const [sampling, setSampling] = useState<SamplingMode>('fixed_fps')
   const [dragOver, setDragOver] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
@@ -70,6 +72,14 @@ export default function UploadPanel({ submitting, onSubmit }: Props) {
 
       {error && <p className="form-error">{error}</p>}
 
+      <label className="sampling-select">
+        采样模式
+        <select value={sampling} onChange={(e) => setSampling(e.target.value as SamplingMode)}>
+          <option value="fixed_fps">固定帧率 2FPS</option>
+          <option value="scene">镜头切换检测</option>
+        </select>
+      </label>
+
       {file && (
         <div className="file-card">
           <span className="file-name">{file.name}</span>
@@ -80,7 +90,7 @@ export default function UploadPanel({ submitting, onSubmit }: Props) {
         </div>
       )}
 
-      <button className="primary" type="button" disabled={submitting || !file} onClick={() => file && onSubmit(file)}>
+      <button className="primary" type="button" disabled={submitting || !file} onClick={() => file && onSubmit(file, sampling)}>
         {submitting ? '上传中…' : '开始处理'}
       </button>
     </section>

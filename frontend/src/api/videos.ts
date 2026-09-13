@@ -1,4 +1,4 @@
-import type { FramesInfo, VideoJob, VideoUploadResponse } from '../types'
+import type { FramesInfo, SamplingMode, VideoJob, VideoUploadResponse } from '../types'
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
 
@@ -25,9 +25,10 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail)
 }
 
-export async function uploadVideo(file: File): Promise<VideoUploadResponse> {
+export async function uploadVideo(file: File, sampling: SamplingMode = 'fixed_fps'): Promise<VideoUploadResponse> {
   const form = new FormData()
   form.append('file', file, file.name)
+  form.append('sampling', sampling)
 
   const res = await fetch(`${BASE_URL}/api/videos`, {
     method: 'POST',

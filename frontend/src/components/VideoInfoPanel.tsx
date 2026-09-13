@@ -1,9 +1,17 @@
-import type { VideoMetadata } from '../types'
+import type { SamplingInfo, VideoMetadata } from '../types'
 
 interface Props {
   filename: string
   metadata: VideoMetadata | null
+  sampling: SamplingInfo | null
   frameCount: number | null
+}
+
+function formatSampling(sampling: SamplingInfo): string {
+  if (sampling.method === 'scene_change') {
+    return `镜头切换检测（阈值 ${sampling.threshold}）`
+  }
+  return `固定帧率（${sampling.fps} FPS）`
 }
 
 function formatDuration(seconds: number): string {
@@ -16,7 +24,7 @@ function formatDuration(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
-export default function VideoInfoPanel({ filename, metadata, frameCount }: Props) {
+export default function VideoInfoPanel({ filename, metadata, sampling, frameCount }: Props) {
   const items: Array<{ label: string; value: string }> = [{ label: '文件名', value: filename }]
 
   if (metadata) {
@@ -27,6 +35,7 @@ export default function VideoInfoPanel({ filename, metadata, frameCount }: Props
     if (metadata.fps !== null) items.push({ label: '帧率', value: `${metadata.fps} FPS` })
     if (metadata.codec !== null) items.push({ label: '编码格式', value: metadata.codec })
   }
+  if (sampling) items.push({ label: '采样方式', value: formatSampling(sampling) })
   if (frameCount !== null) items.push({ label: '抽取帧数', value: String(frameCount) })
 
   return (

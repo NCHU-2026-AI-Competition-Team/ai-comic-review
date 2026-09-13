@@ -83,6 +83,23 @@ body {
   margin: 4px 0;
 }
 
+.sampling-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  margin-bottom: 12px;
+}
+
+.sampling-select select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 14px;
+}
+
 .file-card {
   display: flex;
   align-items: center;

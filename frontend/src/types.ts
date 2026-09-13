@@ -1,5 +1,15 @@
 export type VideoStatus = 'processing' | 'processed' | 'failed'
 
+export type SamplingMode = 'fixed_fps' | 'scene'
+
+export type SamplingMethod = 'fixed_fps' | 'scene_change'
+
+export interface SamplingInfo {
+  method: SamplingMethod
+  fps: number | null
+  threshold: number | null
+}
+
 export interface VideoMetadata {
   duration: number | null
   width: number | null
@@ -17,6 +27,7 @@ export interface FrameInfo {
 }
 
 export interface FramesInfo {
+  sampling: SamplingInfo
   count: number
   frames: FrameInfo[]
 }
@@ -25,6 +36,7 @@ export interface VideoJob {
   video_id: string
   filename: string
   status: VideoStatus
+  sampling: SamplingMode
   error: string | null
   metadata: VideoMetadata | null
   frames: FramesInfo | null
@@ -35,6 +47,7 @@ export interface VideoUploadResponse {
   video_id: string
   filename: string
   status: VideoStatus
+  sampling: SamplingMode
   metadata: VideoMetadata | null
   frames: FramesInfo | null
 }
