@@ -3,6 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 仓库根目录（backend/app/core/config.py 向上四级）
@@ -12,13 +13,14 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 class Settings(BaseSettings):
     """全局配置项，均可通过同名环境变量或 .env 文件覆盖。"""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # .env 固定从仓库根目录读取，与 README 的启动方式（根目录 cp .env.example .env）一致
+    model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", extra="ignore")
 
     app_env: str = "development"
     backend_host: str = "127.0.0.1"
     backend_port: int = 8000
     storage_dir: str = "storage"
-    frame_extraction_fps: float = 2.0
+    frame_extraction_fps: float = Field(default=2.0, gt=0, description="抽帧帧率，必须大于 0")
     max_upload_size_mb: int = 500
 
     @property

@@ -129,7 +129,7 @@ storage/
 
 ## 配置项
 
-`app/core/config.py` 的 `Settings`，全部支持同名环境变量或 `.env` 覆盖：
+`app/core/config.py` 的 `Settings`，全部支持同名环境变量或 `.env` 覆盖（`.env` 固定从仓库根目录读取，与 README 的启动方式一致）：
 
 | 字段 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -137,7 +137,7 @@ storage/
 | `backend_host` | `BACKEND_HOST` | `127.0.0.1` | 后端监听地址 |
 | `backend_port` | `BACKEND_PORT` | `8000` | 后端监听端口 |
 | `storage_dir` | `STORAGE_DIR` | `storage` | 存储目录，相对路径基于仓库根目录 |
-| `frame_extraction_fps` | `FRAME_EXTRACTION_FPS` | `2.0` | 抽帧帧率 |
+| `frame_extraction_fps` | `FRAME_EXTRACTION_FPS` | `2.0` | 抽帧帧率，必须大于 0，非法值在启动时即报错 |
 | `max_upload_size_mb` | `MAX_UPLOAD_SIZE_MB` | `500` | 上传文件大小上限（MB） |
 
 其他相关配置：CORS 允许来源在 `main.py` 中固定为 `http://localhost:5173` / `http://127.0.0.1:5173`（Vite 开发服务器）；前端 API 地址为 `VITE_API_BASE_URL`（默认空串，走 Vite proxy）。

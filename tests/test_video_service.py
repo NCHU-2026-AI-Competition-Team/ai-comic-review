@@ -64,10 +64,76 @@ def test_parse_probe_output_empty() -> None:
     assert metadata.codec is None
 
 
+def test_parse_probe_output_na_fields() -> None:
+    """ffprobe 字段为 'N/A' 时相应字段为 None 而非解析崩溃。"""
+    data = {
+        "streams": [
+            {
+                "codec_type": "video",
+                "codec_name": "h264",
+                "width": "N/A",
+                "height": "N/A",
+                "avg_frame_rate": "N/A",
+                "r_frame_rate": "N/A",
+            }
+        ],
+        "format": {"duration": "N/A", "bit_rate": "N/A"},
+    }
+    metadata = video._parse_probe_output(data)
+    assert metadata.duration is None
+    assert metadata.width is None
+    assert metadata.height is None
+    assert metadata.fps is None
+    assert metadata.bitrate is None
+    assert metadata.codec == "h264"
+
+
+def test_safe_number_helpers() -> None:
+    assert video._safe_float("12.5") == 12.5
+    assert video._safe_float("N/A") is None
+    assert video._safe_float(None) is None
+    assert video._safe_int("1500000") == 1500000
+    assert video._safe_int("N/A") is None
+    assert video._safe_int(None) is None
+
+
 def test_format_timestamp() -> None:
     assert video._format_timestamp(0) == "00:00:00.000"
     assert video._format_timestamp(83456) == "00:01:23.456"
     assert video._format_timestamp(3661007) == "01:01:01.007"
+
+
+def test_extract_frames_path_prefix_and_timestamps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """frames.json 的 path 必须以 /api/videos/ 开头，时间戳按 index*1000/fps 计算无累积误差。"""
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    monkeypatch.setattr(video, "_require_tool", lambda name: name)
+
+    def fake_run(cmd: list, **kwargs: object) -> subprocess.CompletedProcess:
+        pattern = cmd[-1]
+        for i in range(3):
+            Path(pattern % i).write_bytes(b"\xff\xd8\xff")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(video.subprocess, "run", fake_run)
+
+    video_id = "12345678-1234-1234-1234-1234567890ab"
+    fps = 29.97
+    info = video.extract_frames(video_id, Path("dummy.mp4"), fps=fps)
+
+    assert info.count == 3
+    # 旧实现 step_ms=33 会得到 [0, 33, 66]，新实现为 [0, 33, 67]
+    assert [f.timestamp_ms for f in info.frames] == [round(i * 1000 / fps) for i in range(3)]
+    for frame in info.frames:
+        assert frame.path.startswith(f"/api/videos/{video_id}/frames/")
+
+    frames_json = json.loads((tmp_path / "frames" / video_id / "frames.json").read_text(encoding="utf-8"))
+    for frame in frames_json["frames"]:
+        assert frame["path"].startswith(f"/api/videos/{video_id}/frames/")
 
 
 def _make_test_video(path: Path, duration: float = 2.0) -> None:

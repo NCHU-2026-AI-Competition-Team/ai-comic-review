@@ -45,6 +45,26 @@ def _parse_fraction(value: str) -> Optional[float]:
     return numerator / denominator
 
 
+def _safe_float(value: object) -> Optional[float]:
+    """宽松解析浮点数，'N/A' 等非法值返回 None 而非抛异常。"""
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: object) -> Optional[int]:
+    """宽松解析整数，'N/A' 等非法值返回 None 而非抛异常。"""
+    if value is None:
+        return None
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return None
+
+
 def _parse_probe_output(data: dict) -> VideoMetadata:
     """从 ffprobe 的 JSON 输出构建 VideoMetadata。"""
     streams = data.get("streams") or []
@@ -53,18 +73,19 @@ def _parse_probe_output(data: dict) -> VideoMetadata:
 
     duration_raw = fmt.get("duration") or video_stream.get("duration")
     bitrate_raw = fmt.get("bit_rate") or video_stream.get("bit_rate")
+    duration = _safe_float(duration_raw)
 
     fps = _parse_fraction(str(video_stream.get("avg_frame_rate", "")))
     if fps is None:
         fps = _parse_fraction(str(video_stream.get("r_frame_rate", "")))
 
     return VideoMetadata(
-        duration=round(float(duration_raw), 3) if duration_raw else None,
-        width=video_stream.get("width"),
-        height=video_stream.get("height"),
+        duration=round(duration, 3) if duration is not None else None,
+        width=_safe_int(video_stream.get("width")),
+        height=_safe_int(video_stream.get("height")),
         fps=round(fps, 3) if fps is not None else None,
         codec=video_stream.get("codec_name"),
-        bitrate=int(bitrate_raw) if bitrate_raw else None,
+        bitrate=_safe_int(bitrate_raw),
     )
 
 
@@ -125,16 +146,18 @@ def extract_frames(video_id: str, video_path: Path, fps: float) -> FramesInfo:
         raise RuntimeError(f"ffmpeg 抽帧失败: {result.stderr.strip()[-500:]}")
 
     frame_files = sorted(out_dir.glob(f"{FRAME_FILENAME_PREFIX}*{FRAME_FILENAME_EXT}"))
-    step_ms = round(1000 / fps)
-    frames = [
-        FrameInfo(
-            frame_id=frame_file.stem,
-            timestamp_ms=index * step_ms,
-            timestamp=_format_timestamp(index * step_ms),
-            path=f"/api/videos/{video_id}/frames/{frame_file.name}",
+    frames = []
+    for index, frame_file in enumerate(frame_files):
+        # 按 index * 1000 / fps 计算，避免步长取整带来的累积误差
+        timestamp_ms = round(index * 1000 / fps)
+        frames.append(
+            FrameInfo(
+                frame_id=frame_file.stem,
+                timestamp_ms=timestamp_ms,
+                timestamp=_format_timestamp(timestamp_ms),
+                path=f"/api/videos/{video_id}/frames/{frame_file.name}",
+            )
         )
-        for index, frame_file in enumerate(frame_files)
-    ]
     info = FramesInfo(count=len(frames), frames=frames)
     (out_dir / FRAMES_JSON).write_text(
         json.dumps(info.model_dump(mode="json"), ensure_ascii=False, indent=2),
