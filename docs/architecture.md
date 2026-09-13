@@ -77,7 +77,7 @@ POST /api/videos (multipart, 字段 file)
   │      a. ffprobe -show_format -show_streams → VideoMetadata，写回任务记录
   │      b. ffmpeg -vf fps={FRAME_EXTRACTION_FPS} 抽帧到
   │         storage/frames/{video_id}/frame_%06d.jpg，并写 frames.json
-  │         （帧清单：frame_id、timestamp_ms、可读时间戳、访问路径）
+  │         （帧清单：frame_id、timestamp_ms、可读时间戳、以 /api/videos/ 开头的访问路径）
   │      c. 任务状态置为 processed
   │      · 处理模块缺失（ImportError）时保持 processing；其他异常置为 failed
   │        且上传接口返回 500

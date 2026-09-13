@@ -131,7 +131,7 @@ def extract_frames(video_id: str, video_path: Path, fps: float) -> FramesInfo:
             frame_id=frame_file.stem,
             timestamp_ms=index * step_ms,
             timestamp=_format_timestamp(index * step_ms),
-            path=f"/videos/{video_id}/frames/{frame_file.name}",
+            path=f"/api/videos/{video_id}/frames/{frame_file.name}",
         )
         for index, frame_file in enumerate(frame_files)
     ]

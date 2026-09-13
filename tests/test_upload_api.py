@@ -157,7 +157,7 @@ def test_get_frames_success(client: TestClient) -> None:
                         "frame_id": "frame_000000",
                         "timestamp_ms": 0,
                         "timestamp": "00:00:00.000",
-                        "path": f"/videos/{VALID_VIDEO_ID}/frames/frame_000000.jpg",
+                        "path": f"/api/videos/{VALID_VIDEO_ID}/frames/frame_000000.jpg",
                     }
                 ],
             },

@@ -55,8 +55,12 @@ export async function getFrames(videoId: string): Promise<FramesInfo> {
   return (await res.json()) as FramesInfo
 }
 
-/** 帧图片地址：对应 GET /api/videos/{video_id}/frames/{filename} 路由。 */
+/** 帧图片地址：frames.json 中的 path 即以 /api/videos/ 开头的可直接访问路径。 */
 export function frameImageUrl(videoId: string, frame: { frame_id: string; path: string }): string {
+  if (frame.path.startsWith('/api/')) {
+    return `${BASE_URL}${frame.path}`
+  }
+  // 兼容旧版 frames.json（path 不带 /api 前缀）：按文件名拼接完整路由
   const filename = frame.path.split('/').pop() ?? `${frame.frame_id}.jpg`
   return `${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/frames/${encodeURIComponent(filename)}`
 }

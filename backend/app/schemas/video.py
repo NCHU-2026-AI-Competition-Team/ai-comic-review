@@ -25,7 +25,7 @@ class FrameInfo(BaseModel):
     frame_id: str = Field(description="帧标识，对应帧图片文件名（不含扩展名）")
     timestamp_ms: int = Field(ge=0, description="时间戳（毫秒）")
     timestamp: str = Field(description="可读时间戳，如 00:01:23.456")
-    path: str = Field(description="帧图片的访问路径")
+    path: str = Field(description="帧图片的访问路径，以 /api/videos/ 开头，可直接 GET 访问")
 
 
 class FramesInfo(BaseModel):

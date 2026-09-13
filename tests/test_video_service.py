@@ -111,7 +111,7 @@ def test_extract_frames_real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert info.count == 4
     assert [f.timestamp_ms for f in info.frames] == [0, 500, 1000, 1500]
     assert info.frames[0].timestamp == "00:00:00.000"
-    assert info.frames[0].path == f"/videos/{video_id}/frames/{info.frames[0].frame_id}.jpg"
+    assert info.frames[0].path == f"/api/videos/{video_id}/frames/{info.frames[0].frame_id}.jpg"
 
     out_dir = tmp_path / "frames" / video_id
     frames_json = json.loads((out_dir / "frames.json").read_text(encoding="utf-8"))
