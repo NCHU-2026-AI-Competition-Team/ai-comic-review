@@ -67,6 +67,35 @@ def test_parse_showinfo_pts_empty() -> None:
     assert scene._parse_showinfo_pts("没有任何时间戳的输出") == []
 
 
+def test_parse_showinfo_pts_scientific_notation() -> None:
+    """科学计数法 pts_time 必须完整解析，不得按普通浮点截断。"""
+    sample = (
+        "[Parsed_showinfo_1 @ 000001ab] n: 1 pts: 1 pts_time:1.23e+03 pos: 1 fmt:yuv420p\n"
+        "[Parsed_showinfo_1 @ 000001ab] n: 2 pts: 2 pts_time:1e-03 pos: 2 fmt:yuv420p\n"
+        "[Parsed_showinfo_1 @ 000001ab] n: 3 pts: 3 pts_time:-1.23e+03 pos: 3 fmt:yuv420p"
+    )
+    assert scene._parse_showinfo_pts(sample) == [-1230000, 1, 1230000]
+
+
+def test_parse_showinfo_pts_edge_float_forms() -> None:
+    """负值、.5、1. 等边界浮点形式均可解析为毫秒。"""
+    sample = (
+        "[Parsed_showinfo_1 @ 000001ab] n: 1 pts: 1 pts_time:-0.5 pos: 1 fmt:yuv420p\n"
+        "[Parsed_showinfo_1 @ 000001ab] n: 2 pts: 2 pts_time:.5 pos: 2 fmt:yuv420p\n"
+        "[Parsed_showinfo_1 @ 000001ab] n: 3 pts: 3 pts_time:1. pos: 3 fmt:yuv420p"
+    )
+    assert scene._parse_showinfo_pts(sample) == [-500, 500, 1000]
+
+
+def test_parse_showinfo_pts_invalid_and_missing() -> None:
+    """pts_time:N/A 与缺少 pts_time 的 showinfo 行不产生时间戳。"""
+    sample = (
+        "[Parsed_showinfo_1 @ 000001ab] n: 1 pts: 1 pts_time:N/A pos: 1 fmt:yuv420p\n"
+        "[Parsed_showinfo_1 @ 000001ab] n: 2 pts: 2 pos: 2 fmt:yuv420p"
+    )
+    assert scene._parse_showinfo_pts(sample) == []
+
+
 @requires_ffmpeg
 def test_detect_scene_changes_real(tmp_path: Path) -> None:
     """三段各 2 秒的拼接视频应检出约 2 个边界，且接近 2000ms/4000ms。"""

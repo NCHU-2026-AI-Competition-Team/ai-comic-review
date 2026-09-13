@@ -25,8 +25,11 @@ from app.services.video import (
 logger = logging.getLogger(__name__)
 
 # showinfo 输出形如 "[Parsed_showinfo_1 @ ...] n: 1 pts: 60 pts_time:2.000000 ..."
-# 用正则提取 pts_time 浮点值，避免依赖固定列位置的脆弱截断
-_PTS_TIME_PATTERN = re.compile(r"pts_time:\s*(-?\d+(?:\.\d+)?)")
+# 极端时长视频的 pts_time 可能是科学计数法（1.23e+03）或边界浮点形式（.5、1.），
+# 正则必须完整匹配整个数值并用负向先行断言锚定边界，避免把 1.23e+03 截断成 1.23
+_PTS_TIME_PATTERN = re.compile(
+    r"pts_time:\s*(-?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)(?![\d.])"
+)
 
 DETECT_TIMEOUT_SECONDS = 300
 EXTRACT_TIMEOUT_SECONDS = 60
