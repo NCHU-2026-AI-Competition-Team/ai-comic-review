@@ -9,5 +9,10 @@ httpx
 # 模型权重首次运行自动下载到用户缓存目录（~/.paddlex），不进入仓库
 paddleocr
 paddlepaddle
+# torch 为 OCR 链路的显式硬依赖：ai/ocr/paddleocr.py 初始化时必须先于 paddle
+# 加载 torch——Windows 下 paddle 先加载会把冲突版本的 DLL 装入进程，导致随后
+# torch 的 shm.dll 解析失败（WinError 127），拖垮 modelscope → paddlex → paddleocr
+# 整条导入链；因此 torch 必须随依赖一并安装，不能依赖传递依赖碰巧存在
+torch
 # 测试用图片生成（引擎集成测试以 Pillow 绘制带文字的测试图）
 pillow

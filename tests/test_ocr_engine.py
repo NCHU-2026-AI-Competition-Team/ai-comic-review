@@ -11,8 +11,11 @@ from pathlib import Path
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    importlib.util.find_spec("paddleocr") is None,
-    reason="paddleocr 未安装，跳过引擎集成测试",
+    importlib.util.find_spec("paddleocr") is None
+    # torch 是引擎初始化的显式硬依赖（Windows 下须先于 paddle 加载，见
+    # ai/ocr/paddleocr.py），缺一即跳过集成测试
+    or importlib.util.find_spec("torch") is None,
+    reason="paddleocr 或 torch 未安装，跳过引擎集成测试",
 )
 
 from ai.ocr.paddleocr import PaddleOcrProvider  # noqa: E402
