@@ -9,6 +9,7 @@
 """
 
 import json
+import math
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -111,6 +112,26 @@ MAX_FRAME_BYTES = 10 * 1024 * 1024  # 单帧最大 10MB
 MAX_TEXT_FIELD_CHARS = 20_000       # 单个文本表单字段最大字符数
 TEXT_FORM_FIELDS = ("ocr_text", "asr_text", "context", "rules")
 
+# 高分辨率帧必须先降采样再进 vLLM。1760x1184 八帧按 factor=28 约 2.1 万图像 token，
+# 远超旧 max_model_len=8192，会让引擎直接抛错变成裸 500。
+# 长边 768：1080p/1760x1184 仍能读字幕；640x360 低分辨率帧不会被放大。
+FRAME_LONG_EDGE = 768
+
+# Qwen2-VL / Qwen2.5-VL 为 patch=14、merge=2 → 28px 一 token。
+# Qwen3-VL 官方为 patch=16、merge=2 → 32px 一 token（更少）。
+# 这里用 28 做保守高估，避免预检查低估后仍撞引擎上限。
+IMAGE_TOKEN_FACTOR = 28
+IMAGE_MIN_PIXELS = 4 * IMAGE_TOKEN_FACTOR * IMAGE_TOKEN_FACTOR
+PER_IMAGE_SPECIAL_TOKENS = 4        # vision_start / vision_end 等
+CHAT_TEMPLATE_TOKEN_OVERHEAD = 128  # chat 模板与结构化输出包装的保守余量
+
+# 降采样后 16:9 八帧图像 token≈3.2k，方形八帧≈5.8k；再加 prompt 与
+# MAX_OUTPUT_TOKENS=1024，方形八帧可能顶满 8192。
+# L40S 实测 KV cache 约 16.56GB / 12 万 tokens，16384 约占 14%，
+# 显存上仍保守；不继续上调，异常超长 OCR/ASR 由 4xx 拦住。
+MAX_MODEL_LEN = 16384
+MAX_OUTPUT_TOKENS = 1024
+
 
 class ReviewContractError(ValueError):
     """契约层异常基类。"""
@@ -180,6 +201,107 @@ def parse_frame_timestamps(raw: str, frame_count: int) -> list[int]:
             )
         timestamps.append(item)
     return timestamps
+
+
+def fit_long_edge(
+    width: int,
+    height: int,
+    long_edge: int = FRAME_LONG_EDGE,
+) -> tuple[int, int]:
+    """按最长边限制缩放，保持宽高比；不超过上限则原样返回。
+
+    尺寸非法时抛 InputValidationError。结果至少为 1x1。
+    """
+    if width <= 0 or height <= 0:
+        raise InputValidationError(f"非法帧尺寸 {width}x{height}")
+    if long_edge <= 0:
+        raise InputValidationError(f"非法长边上限 {long_edge}")
+    current_long = max(width, height)
+    if current_long <= long_edge:
+        return width, height
+    scale = long_edge / current_long
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
+def _round_by_factor(number: int, factor: int) -> int:
+    return round(number / factor) * factor
+
+
+def aligned_vision_size(
+    width: int,
+    height: int,
+    factor: int = IMAGE_TOKEN_FACTOR,
+) -> tuple[int, int]:
+    """把宽高对齐到 factor 倍数，模拟 Qwen-VL smart_resize（不含 max_pixels 再压缩）。"""
+    if width <= 0 or height <= 0:
+        raise InputValidationError(f"非法帧尺寸 {width}x{height}")
+    h_bar = max(factor, _round_by_factor(height, factor))
+    w_bar = max(factor, _round_by_factor(width, factor))
+    if h_bar * w_bar < IMAGE_MIN_PIXELS:
+        beta = math.sqrt(IMAGE_MIN_PIXELS / max(1, height * width))
+        h_bar = math.ceil(height * beta / factor) * factor
+        w_bar = math.ceil(width * beta / factor) * factor
+    return w_bar, h_bar
+
+
+def estimate_image_tokens(width: int, height: int) -> int:
+    """估算单帧图像 token（空间网格，不含 special token）。"""
+    aligned_w, aligned_h = aligned_vision_size(width, height)
+    return (aligned_w // IMAGE_TOKEN_FACTOR) * (aligned_h // IMAGE_TOKEN_FACTOR)
+
+
+def estimate_review_prompt_tokens(
+    image_sizes: list[tuple[int, int]],
+    prompt_text: str,
+) -> int:
+    """估算 /review 一次请求的输入 token（图像 + 文本 + 模板开销）。
+
+    文本按 1 token/字符计：中文约 1:1，英文偏高估，用作硬上限预检查。
+    """
+    image_tokens = sum(estimate_image_tokens(width, height) for width, height in image_sizes)
+    special = PER_IMAGE_SPECIAL_TOKENS * len(image_sizes)
+    text_tokens = max(1, len(prompt_text))
+    return image_tokens + special + text_tokens + CHAT_TEMPLATE_TOKEN_OVERHEAD
+
+
+def ensure_review_fits_model_len(
+    image_sizes: list[tuple[int, int]],
+    prompt_text: str,
+    *,
+    max_model_len: int = MAX_MODEL_LEN,
+    max_output_tokens: int = MAX_OUTPUT_TOKENS,
+) -> int:
+    """输入 token + 输出预留超过 max_model_len 时抛 InputValidationError。
+
+    返回估算的输入 token 数，供日志与测试断言。
+    """
+    input_tokens = estimate_review_prompt_tokens(image_sizes, prompt_text)
+    needed = input_tokens + max_output_tokens
+    if needed > max_model_len:
+        size_desc = ", ".join(f"{width}x{height}" for width, height in image_sizes) or "（无）"
+        image_tokens = sum(
+            estimate_image_tokens(width, height) for width, height in image_sizes
+        )
+        raise InputValidationError(
+            f"图像 token 估算超限：{len(image_sizes)} 帧降采样后尺寸 [{size_desc}]，"
+            f"图像 token≈{image_tokens}，prompt 输入≈{input_tokens}，"
+            f"加输出预留 {max_output_tokens} 共 {needed}，超过 max_model_len={max_model_len}。"
+            "请减少帧数、缩短 OCR/ASR 文本，或降低分辨率。"
+        )
+    return input_tokens
+
+
+def is_model_len_error(exc: BaseException) -> bool:
+    """识别 vLLM 因 prompt/图像 token 超过 max_model_len 抛出的异常。"""
+    text = str(exc).lower()
+    needles = (
+        "max_model_len",
+        "maximum model length",
+        "longer than the maximum",
+        "exceeds the model's context",
+        "context length",
+    )
+    return any(needle in text for needle in needles)
 
 
 def build_review_prompt(

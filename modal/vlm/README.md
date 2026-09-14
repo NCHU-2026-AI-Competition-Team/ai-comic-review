@@ -11,6 +11,9 @@ OCR/ASR 文本上下文做内容安全审核，输出严格 JSON 契约。
 - GPU：L40S（48GB，约 $1.95/h，价格参考见文末）。A10G（22GB）实测 OOM：
   BF16 权重 17.7GB + vLLM 多帧 ViT profiling 峰值 4.6GB 超出容量，
   精度纪律禁止靠 INT8/INT4 省显存，故按实际需求升级
+- 高分辨率帧：云端解码后按**长边 768**保持宽高比降采样再进 vLLM
+  （低分辨率如 640×360 不放大）。根因是 1760×1184 八帧图像 token 约 2.1 万，
+  远超旧 `max_model_len=8192`，vLLM 直接抛错变成裸 500。
 - 32B 复审模型本期**不部署**（用户决定，工期原因），接口已预留
   escalation 模型位：收到 32B 标识返回明确 501
 
@@ -19,7 +22,7 @@ OCR/ASR 文本上下文做内容安全审核，输出严格 JSON 契约。
 | 文件 | 作用 |
 | --- | --- |
 | `serve.py` | Modal app：镜像构建、GPU 规格、权重 Volume 缓存、FastAPI web 端点 |
-| `review_contract.py` | 纯逻辑契约：模型路由、输入校验、输出 JSON Schema、prompt 构建、结果归一化（仅标准库，tests 直接复用） |
+| `review_contract.py` | 纯逻辑契约：模型路由、输入校验、输出 JSON Schema、prompt 构建、结果归一化、帧长边缩放与图像 token 估算（仅标准库，tests 直接复用） |
 
 ## 部署
 
@@ -85,7 +88,9 @@ modal app stop ai-comic-review-vlm
 - 无风险时 `risk=false`，且 `category`/`severity` 归一化为约定空值
   `none`，`start_ms`/`end_ms` 归零
 - 模型输出由 vLLM 结构化输出约束；仍不合规时自动重试一次，再失败返回
-  502；输入畸形返回 400/422；32B 标识返回 501
+  502；输入畸形返回 400/422；32B 标识返回 501。降采样后若图像+文本 token
+  估算仍超过 `max_model_len`，返回 **400**，`detail` 含「图像 token 估算超限」
+  与帧尺寸/估算值，而不是引擎裸 500。`MAX_FRAMES_PER_REQUEST=8` 不变。
 
 ### GET /health
 
@@ -127,22 +132,40 @@ curl -sS -o /dev/null -w "%{http_code}\n" "$ENDPOINT/review" \
 ## 实测记录
 
 端点：`https://jadecake5--ai-comic-review-vlm-vlmreviewer-web.modal.run`
-（2026-09-14 真实 `modal deploy` 部署并 curl 验证）
+（2026-09-14 首次部署；**2026-09-15 高分辨率修复后重新 `modal deploy`，端点 URL 不变**）
 
-引擎基线（L40S 48GB，BF16，enforce_eager，max_model_len=8192）：
+引擎基线（L40S 48GB，BF16，enforce_eager，`max_model_len=16384`，长边 768 降采样）：
 
 - 权重显存约 17.4GB；vLLM 可用 KV cache 16.56GB（约 12 万 tokens）
-- 冷启动（容器拉起 + 引擎加载，权重已命中 Volume 缓存）：约 67 秒
+- 冷启动（容器拉起 + 引擎加载，权重已命中 Volume 缓存）：约 73 秒（2026-09-15）
+- 为何上调 `max_model_len` 8192→16384：降采样后 16:9 八帧足够落在 8192 内，
+  但方形 768 八帧图像 token≈5832 + prompt + 输出预留 1024 可能顶满 8192。
+  16384 约占 KV cache 12 万 tokens 的 14%，显存仍保守；不继续上调，
+  异常超长 OCR/ASR 由 400 拦住。本地 `VLM_MAX_FRAMES_PER_REQUEST` 未改。
+
+图像 token 估算（factor=28 保守高估；Qwen3-VL 官方 factor=32 会更少）：
+
+| 输入 | 降采样后尺寸 | 图像 token | 输入+输出预留 |
+| --- | --- | --- | --- |
+| 1760×1184 ×8（用户 17601184 真实抽帧，未降采样） | 1760×1184 | 21168 | 23038（远超旧 8192） |
+| 同上，长边 768 | 768×517 | 3888 | 5771 |
+| 1920×1080 ×8，长边 768 | 768×432 | 3240 | 5110 |
+| 768×768 ×8 | 768×768 | 5832 | 7702 |
+| 640×360 ×3（不放大） | 640×360 | 897 | 2677 |
 
 | 用例 | 结果 | 耗时 |
 | --- | --- | --- |
-| GET /health | 200，返回模型/GPU/escalation 状态 | 冷启动 67s |
-| /review 风险场景：3 帧 + OCR「他拿起刀刺向对方，鲜血直流」+ ASR 威胁台词 | 200，`risk=true, category=violence, severity=high, confidence=0.95, start_ms=500, end_ms=1000`（int 毫秒），evidence 正确指向第 2 帧 OCR | 12.5s（首次推理） |
+| GET /health | 200，返回模型/GPU/escalation 状态 | 冷启动 73s（2026-09-15） |
+| /review 高分辨率：1760×1184 真实抽帧 JPEG ×8（源 `d582af31-5000-45e3-a974-4807bc7547cd.mp4`） | 200，JSON 九字段合规，`risk=false, category/severity=none, start_ms/end_ms=0, confidence=0.99` | 11.95s（热启动） |
+| /review 低分辨率回归：640×360 ×3 | 200，`risk=false`，归一化空值生效 | 5.10s |
+| /review 8 帧 + OCR/ASR 各 2 万字 | 400，`detail` 含「图像 token 估算超限」与尺寸/估算值（prompt 输入≈43232 > 16384） | <1s |
+| /review 风险场景：3 帧 + OCR「他拿起刀刺向对方，鲜血直流」+ ASR 威胁台词 | 200，`risk=true, category=violence, severity=high, confidence=0.95, start_ms=500, end_ms=1000`（int 毫秒），evidence 正确指向第 2 帧 OCR | 12.5s（首次推理，2026-09-14） |
 | /review 安全场景：2 帧 + 日常 OCR/ASR | 200，`risk=false` 且 `category/severity=none`、`start_ms/end_ms=0`（归一化生效），confidence=0.99 | 4.5s |
-| /review model=qwen3-vl-32b-instruct | 501，明确提示 escalation 未部署 | <1s |
+| /review model=qwen3-vl-32b-instruct | 501，明确提示 escalation 未部署 | <1s（2026-09-15 复测仍 501） |
 | /review model=未知标识 | 400 | <1s |
 | /review 非图片文件 | 422 | <1s |
 | /review 缺 frames 字段 | 422（FastAPI 缺参校验） | <1s |
+| 本地端到端 `POST /api/videos/{id}/review?force=true`（上传 17601184.mp4，抽 10 帧 1760×1184，分批 8+2 调云端） | 200，`event_count=10, reused=false, needs_escalation=false`；`video_id=a4441583-5393-41dd-930c-60def45f42fb` | 14.63s（云端已热） |
 
 部署过程中的两个真实故障与修复（如实记录）：
 
@@ -152,3 +175,7 @@ curl -sS -o /dev/null -w "%{http_code}\n" "$ENDPOINT/review" \
 2. A10G（22GB）引擎 profiling 阶段 CUDA OOM：BF16 权重 17.36GB +
    多帧 ViT profiling 单次申请 4.62GB 超出容量；按精度纪律不做 INT8/INT4
    降级，升级到 L40S（48GB）后正常。
+3. 高分辨率视频（1760×1184，用户 17601184）抽 10 帧后按批 8 帧调 `/review`
+   返回裸 500：未降采样时八帧图像 token≈21168，超过 `max_model_len=8192`。
+   修复为长边 768 降采样（768×517，图像 token≈3888）+ 超限返回可读 400 +
+   `max_model_len` 上调至 16384。

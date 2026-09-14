@@ -198,3 +198,112 @@ class TestValidateReviewResult:
                                       start_ms=0, end_ms=500), ensure_ascii=False)
         result = contract.validate_review_result(json.loads(raw))
         assert result["category"] == "violence"
+
+
+# ---------------------------------------------------------------------------
+# 高分辨率帧降采样与图像 token 估算
+# ---------------------------------------------------------------------------
+
+_SERVE_PATH = Path(__file__).resolve().parents[1] / "modal" / "vlm" / "serve.py"
+
+
+class TestFitLongEdge:
+    def test_1080p_to_768(self):
+        assert contract.fit_long_edge(1920, 1080) == (768, 432)
+
+    def test_real_video_1760x1184(self):
+        # 用户 17601184 实测源分辨率
+        width, height = contract.fit_long_edge(1760, 1184)
+        assert width == contract.FRAME_LONG_EDGE
+        assert height == round(1184 * 768 / 1760)
+        assert max(width, height) == 768
+        assert abs(width / height - 1760 / 1184) < 0.01
+
+    def test_low_res_unchanged(self):
+        assert contract.fit_long_edge(640, 360) == (640, 360)
+
+    def test_portrait_uses_height_as_long_edge(self):
+        assert contract.fit_long_edge(1080, 1920) == (432, 768)
+
+    def test_square(self):
+        assert contract.fit_long_edge(2000, 2000) == (768, 768)
+
+    def test_invalid_size_raises(self):
+        with pytest.raises(contract.InputValidationError):
+            contract.fit_long_edge(0, 100)
+
+    def test_matches_pil_resize(self):
+        from PIL import Image
+
+        original = Image.new("RGB", (1920, 1080), (12, 34, 56))
+        target = contract.fit_long_edge(*original.size)
+        resized = original.resize(target, Image.Resampling.LANCZOS)
+        assert resized.size == (768, 432)
+        assert resized.mode == "RGB"
+
+
+class TestImageTokenEstimate:
+    def test_low_res_three_frames_fit_old_8192(self):
+        sizes = [(640, 360)] * 3
+        prompt = contract.build_review_prompt([0, 500, 1000], ocr_text="日常字幕", asr_text="你好")
+        tokens = contract.ensure_review_fits_model_len(
+            sizes, prompt, max_model_len=8192, max_output_tokens=1024
+        )
+        assert tokens + 1024 <= 8192
+        assert contract.estimate_image_tokens(640, 360) < 400
+
+    def test_hires_eight_frames_without_downsample_exceed_old_8192(self):
+        sizes = [(1760, 1184)] * 8
+        prompt = contract.build_review_prompt(list(range(0, 4000, 500)))
+        image_tokens = sum(contract.estimate_image_tokens(w, h) for w, h in sizes)
+        # 根因：约 2.1 万图像 token，远超旧上限
+        assert image_tokens > 8192
+        with pytest.raises(contract.InputValidationError, match="图像 token"):
+            contract.ensure_review_fits_model_len(
+                sizes, prompt, max_model_len=8192, max_output_tokens=1024
+            )
+
+    def test_hires_eight_frames_after_downsample_fit(self):
+        sizes = [contract.fit_long_edge(1760, 1184)] * 8
+        prompt = contract.build_review_prompt(
+            list(range(0, 4000, 500)),
+            ocr_text="他拿起刀刺向对方，鲜血直流",
+            asr_text="你给我去死吧",
+        )
+        tokens = contract.ensure_review_fits_model_len(sizes, prompt)
+        assert tokens + contract.MAX_OUTPUT_TOKENS <= contract.MAX_MODEL_LEN
+        per_frame = contract.estimate_image_tokens(*sizes[0])
+        assert per_frame < 800
+        assert per_frame * 8 < 5000
+
+    def test_over_budget_text_returns_readable_error(self):
+        sizes = [contract.fit_long_edge(1920, 1080)] * 8
+        huge = "字" * contract.MAX_TEXT_FIELD_CHARS
+        prompt = contract.build_review_prompt(
+            list(range(0, 4000, 500)), ocr_text=huge, asr_text=huge
+        )
+        with pytest.raises(contract.InputValidationError, match="图像 token 估算超限") as exc_info:
+            contract.ensure_review_fits_model_len(sizes, prompt)
+        message = str(exc_info.value)
+        assert "max_model_len" in message
+        assert "8 帧" in message
+
+    def test_model_len_error_detection(self):
+        assert contract.is_model_len_error(
+            ValueError("The decoder prompt (length 25000) is longer than the maximum model length of 8192")
+        )
+        assert contract.is_model_len_error(RuntimeError("prompt exceeds max_model_len=8192"))
+        assert not contract.is_model_len_error(ValueError("invalid JSON"))
+
+
+def test_serve_source_downsamples_before_vllm():
+    source = _SERVE_PATH.read_text(encoding="utf-8")
+    assert "fit_long_edge" in source
+    assert "FRAME_LONG_EDGE" in source
+    assert "ensure_review_fits_model_len" in source
+    assert "is_model_len_error" in source
+    assert "Image.Resampling.LANCZOS" in source
+    assert "max_model_len=MAX_MODEL_LEN" in source
+    assert "limit_mm_per_prompt={\"image\": MAX_FRAMES_PER_REQUEST}" in source
+    assert contract.MAX_FRAMES_PER_REQUEST == 8
+    assert contract.FRAME_LONG_EDGE == 768

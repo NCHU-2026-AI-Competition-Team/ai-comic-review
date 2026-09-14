@@ -5,9 +5,10 @@ HF 权重 Volume 缓存 + HTTPS web endpoint），业务逻辑为本仓审核契
 
 - 模型：Qwen/Qwen3-VL-8B-Instruct（Apache-2.0，非 gated），BF16 精度基线，
   禁止为省显存直接上 INT8/INT4（审核 Recall 优先）。
-- GPU：A10G（24GB），8B BF16 单卡可承载。
+- GPU：L40S（48GB）。A10G（22GB）实测 OOM，精度纪律禁止 INT8/INT4。
 - 接口：POST /review（multipart 多帧 + 文本表单字段），输出严格 JSON，
   由 vLLM 结构化输出（JSON Schema guided decoding）保证格式。
+- 高分辨率帧：解码后按长边 768 降采样再进 vLLM，避免图像 token 撞 max_model_len。
 - escalation 预留：model 表单字段收到 32B 标识时返回明确 501。
 
 部署：cd modal/vlm && modal deploy serve.py
@@ -17,8 +18,11 @@ import modal
 
 from review_contract import (
     ESCALATION_MODEL_ID,
+    FRAME_LONG_EDGE,
     MAX_FRAME_BYTES,
     MAX_FRAMES_PER_REQUEST,
+    MAX_MODEL_LEN,
+    MAX_OUTPUT_TOKENS,
     PRIMARY_HF_REPO,
     PRIMARY_MODEL_ID,
     REVIEW_JSON_SCHEMA,
@@ -26,6 +30,9 @@ from review_contract import (
     ResultValidationError,
     UnknownModelError,
     build_review_prompt,
+    ensure_review_fits_model_len,
+    fit_long_edge,
+    is_model_len_error,
     parse_frame_timestamps,
     resolve_model_role,
     validate_review_result,
@@ -40,8 +47,7 @@ APP_NAME = "ai-comic-review-vlm"
 # A10G（22GB）实测 OOM：BF16 权重 17.7GB + vLLM 多帧 ViT profiling 峰值 4.6GB 放不下；
 # 精度纪律禁止 INT8/INT4 省显存，故按实际需求升级到 L40S（48GB）
 GPU_TYPE = "L40S"               # 48GB；8B BF16 权重约 16GB + ViT 峰值 + KV cache
-MAX_MODEL_LEN = 8192            # 8 帧多图 + 文本上下文足够；显存保守取值
-MAX_OUTPUT_TOKENS = 1024
+# MAX_MODEL_LEN / MAX_OUTPUT_TOKENS 在 review_contract.py 唯一定义
 SCALEDOWN_WINDOW_SECONDS = 300  # 空闲 5 分钟自动缩容，控制成本
 MAX_CONCURRENT_INPUTS = 4
 
@@ -122,6 +128,13 @@ class VlmReviewer:
             frame_timestamps_ms, ocr_text=ocr_text, asr_text=asr_text,
             context=context, rules=rules,
         )
+        # 降采样后仍可能因超长 OCR/ASR 顶满上下文：先给可读 4xx，避免 vLLM 裸 500
+        ensure_review_fits_model_len(
+            [(image.width, image.height) for image in images],
+            prompt_text,
+            max_model_len=MAX_MODEL_LEN,
+            max_output_tokens=MAX_OUTPUT_TOKENS,
+        )
         messages = [
             {
                 "role": "user",
@@ -144,8 +157,16 @@ class VlmReviewer:
         # 结构化输出已基本保证格式；仍兜底重试一次，失败抛 ResultValidationError
         last_error: Exception | None = None
         for _attempt in range(2):
-            with self._lock:
-                outputs = self._llm.generate([request], sampling_params)
+            try:
+                with self._lock:
+                    outputs = self._llm.generate([request], sampling_params)
+            except Exception as exc:
+                if is_model_len_error(exc):
+                    raise InputValidationError(
+                        "图像 token 估算超限（引擎拒绝）："
+                        f"max_model_len={MAX_MODEL_LEN}，细节：{exc}"
+                    ) from exc
+                raise
             raw_text = outputs[0].outputs[0].text
             try:
                 return validate_review_result(json.loads(raw_text))
@@ -230,18 +251,27 @@ class VlmReviewer:
                 try:
                     image = Image.open(io.BytesIO(payload))
                     image.load()
-                    images.append(image.convert("RGB"))
+                    image = image.convert("RGB")
                 except Exception:
                     return JSONResponse(
                         status_code=422,
                         content={"detail": f"frames[{index}] 不是可解码的图片文件"},
                     )
+                try:
+                    target = fit_long_edge(image.width, image.height, FRAME_LONG_EDGE)
+                except InputValidationError as exc:
+                    return JSONResponse(status_code=400, content={"detail": str(exc)})
+                if (image.width, image.height) != target:
+                    image = image.resize(target, Image.Resampling.LANCZOS)
+                images.append(image)
 
-            # --- 推理：输出不合规时明确 502 ---
+            # --- 推理：输入超限明确 4xx；输出不合规时明确 502 ---
             try:
                 result = self._review_frames(
                     images, timestamps, ocr_text, asr_text, context, rules,
                 )
+            except InputValidationError as exc:
+                return JSONResponse(status_code=400, content={"detail": str(exc)})
             except ResultValidationError as exc:
                 return JSONResponse(
                     status_code=502,
