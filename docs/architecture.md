@@ -13,9 +13,13 @@ flowchart LR
 
     subgraph 后端[后端 FastAPI :8000]
         ROUTE[api 路由层<br/>health.py / videos.py]
-        SVC[services 业务层<br/>video/ 包 / registry.py]
+        SVC[services 业务层<br/>video/ 包 / ocr_pipeline.py / registry.py]
         SCHEMA[schemas 数据模型<br/>video.py / events.py]
         CFG[core/config.py 配置]
+    end
+
+    subgraph AI[ai/ 多模态能力]
+        OCRP[ocr/base.py Provider 抽象<br/>ocr/paddleocr.py PP-OCRv6 实现]
     end
 
     subgraph 外部工具
@@ -26,18 +30,21 @@ flowchart LR
     subgraph 磁盘[storage/]
         UPL[uploads/<br/>原始视频 + job.json]
         FRM[frames/<video_id>/<br/>帧图片 + frames.json]
-        OUT[outputs/ 预留]
+        OUT[outputs/<video_id>/<br/>ocr.json 事件产出]
     end
 
     UP --> API --> ROUTE
     ROUTE --> SVC
+    SVC --> AI
     SVC --> FFP
     SVC --> FFM
     SVC --> UPL
     SVC --> FRM
+    SVC --> OUT
     ROUTE --> SCHEMA
     ROUTE --> CFG
     API -->|GET 状态/帧清单/帧图片| ROUTE
+    API -->|POST OCR / GET 事件| ROUTE
     FG -->|img src| ROUTE
 ```
 
@@ -50,19 +57,25 @@ backend/app/
 ├── main.py            # 应用入口：创建 app、注册 CORS 与路由、启动时确保存储目录存在
 ├── api/               # 路由层：HTTP 入参校验、状态码、响应组装
 │   ├── health.py      #   GET /api/health
-│   └── videos.py      #   视频上传与结果查询（/api/videos ...）
+│   └── videos.py      #   视频上传与结果查询、OCR 触发与事件查询（/api/videos ...）
 ├── services/          # 业务层：不感知 HTTP
 │   ├── video/         #   视频处理包：__init__.py（ffprobe 元数据、固定帧率抽帧、frames.json 落盘、流程编排）
 │   │   └── scene.py   #   镜头切换检测（scene_change 采样模式）
+│   ├── ocr_pipeline.py#   OCR 编排：读 frames.json → 逐帧识别 → TimelineEvent → ocr.json
 │   └── registry.py    #   任务记录（VideoJob）的文件注册表，接口与存储解耦，后续可替换为 PostgreSQL
 ├── schemas/           # 数据模型（Pydantic）
 │   ├── video.py       #   VideoJob / VideoMetadata / FramesInfo / FrameInfo / SamplingInfo / VideoUploadResponse
-│   └── events.py      #   TimelineEvent 统一时间线事件（预留，供 OCR/ASR/视觉/VLM 归一产出）
+│   └── events.py      #   TimelineEvent 统一时间线事件 / ModalityRunResponse（OCR 已落地，ASR/视觉/VLM 预留）
 └── core/
     └── config.py      # Settings（pydantic-settings），lru_cache 单例 get_settings()
+
+ai/                    # 多模态能力包（仓库根，经 sys.path/pythonpath 可被 backend 与 pytest 导入）
+└── ocr/
+    ├── base.py        #   OcrProvider 抽象基类 + OcrTextLine，业务层只依赖此接口
+    └── paddleocr.py   #   PaddleOcrProvider：PP-OCRv6 实现，惰性单例，模型/语言/设备走配置
 ```
 
-分层依赖方向：`api` → `services` → `schemas` / `core`。路由层只做校验与编排；`services/video` 包通过 `subprocess.run` 以参数列表形式调用 ffprobe/ffmpeg（无 shell）；`services/registry.py` 将任务记录以 `job.json` 落盘，对上层屏蔽存储细节。
+分层依赖方向：`api` → `services` → `ai` / `schemas` / `core`。路由层只做校验与编排；`services/video` 包通过 `subprocess.run` 以参数列表形式调用 ffprobe/ffmpeg（无 shell）；`services/registry.py` 将任务记录以 `job.json` 落盘，对上层屏蔽存储细节；`services/ocr_pipeline.py` 只依赖 `ai.ocr.base` 的 Provider 抽象，不感知具体 OCR 引擎。
 
 ## 视频上传与抽帧流程
 
@@ -96,6 +109,39 @@ POST /api/videos (multipart, 字段 file，可选字段 sampling=fixed_fps|scene
 - `GET /api/videos/{video_id}/frames` → 读取 `frames/{video_id}/frames.json`；未生成 404，文件损坏 500。
 - `GET /api/videos/{video_id}/frames/{filename}` → 帧图片；文件名必须为纯文件名且后缀属于 .jpg/.jpeg/.png，否则 404。
 
+## OCR 分支：Video → Frames → OCR → TimelineEvent(ocr)
+
+```
+POST /api/videos/{video_id}/ocr
+  │
+  ├─ 1. video_id 校验；任务记录不存在 404
+  ├─ 2. frames.json 不存在（未抽帧）返回 409 并提示先完成抽帧；损坏返回 500
+  ├─ 3. services/ocr_pipeline.run_ocr 同步执行（本阶段不引入任务队列）：
+  │      a. 逐帧调用 ai.ocr 的 OcrProvider.recognize（惰性单例，首次加载模型）
+  │      b. 每帧文字行聚合为 TimelineEvent：modality='ocr'，
+  │         start_ms=end_ms=帧的 timestamp_ms（与抽帧时间轴严格对齐，
+  │         供后续 ASR/视觉/VLM 事件在同一时间轴上融合）；
+  │         content 为各行文本换行拼接，confidence 取各行均值，
+  │         逐行明细（text/confidence/box）保留在 metadata.lines
+  │      c. 无文本帧不产事件；单帧识别失败记 warning 跳过，不中断整体
+  │      d. 结果落盘 storage/outputs/{video_id}/ocr.json
+  │         （{video_id, modality, events: [...]}）
+  └─ 4. 返回 {video_id, modality: 'ocr', event_count}
+
+GET /api/videos/{video_id}/events?modality=ocr
+  └─ 读取 outputs/{video_id}/{modality}.json 返回 TimelineEvent 列表；
+     未生成 404，文件损坏 500；modality 取值受枚举校验（ocr/asr/vision/vlm）
+```
+
+OCR 引擎依赖（paddleocr/paddlepaddle）只在 `ai/ocr/paddleocr.py` 内延迟导入，未安装 OCR 环境时后端其余功能与测试照常运行。Windows 环境下 paddle 与 torch 共存时必须先导入 torch（否则 torch 的 shm.dll 解析失败拖垮 modelscope → paddlex → paddleocr 导入链），该约束已在 `ai/ocr/paddleocr.py` 内处理并注释。
+
+## 模型选型与 Provider 抽象
+
+多模态能力的统一约定：每个模态在 `ai/{modality}/base.py` 定义 Provider 抽象（输入输出契约），具体引擎以同接口实现并惰性加载，模型标识全部走 `core/config.py` 配置（禁止散落在业务代码）；业务编排只依赖 base 抽象，更换引擎不影响编排与路由。
+
+- OCR：主模型 PP-OCRv6（`ai/ocr/paddleocr.py` 的 PaddleOcrProvider，PaddleOCR 官方包，默认 CPU）；备用疑难模型 PaddleOCR-VL 仅由配置记录标识（`ocr_fallback_model`），后续切片以同接口接入，当前不落任何占位实现。模型名、语言、设备见配置项表的 `ocr_*` 项。
+- ASR / 视觉 / VLM / 风险融合：尚未实现，接入时遵循同一 Provider 约定（base 抽象 + 配置驱动 + 惰性加载），产出统一归一到 TimelineEvent。
+
 ## 前端页面与 API 交互
 
 单页应用（`App.tsx`），以 phase 状态机驱动：`idle → uploading → processing → processed / failed / error`。
@@ -103,7 +149,8 @@ POST /api/videos (multipart, 字段 file，可选字段 sampling=fixed_fps|scene
 1. `UploadPanel`：拖拽或点选单个视频并选择采样模式（固定帧率 2FPS / 镜头切换检测），前端先做扩展名预校验，提交时 `uploadVideo()` 携带 sampling 字段发起 `POST /api/videos`。
 2. 上传响应若直接是 `processed` 则展示结果；若为 `processing` 则每 2 秒轮询 `GET /api/videos/{video_id}`，直到 `processed` / `failed`。
 3. 成功后调用 `GET .../frames` 拉取帧清单（仅 404 未生成时退回任务记录中携带的帧信息，500/网络异常等错误直接向用户展示），`VideoInfoPanel` 展示元数据，`FramesGrid` 以帧图片 URL（`GET .../frames/{filename}`）渲染帧网格。
-4. `failed / error` 状态展示错误信息并允许返回重新上传。
+4. 结果区的 `OcrPanel` 提供「运行 OCR」按钮：触发 `POST .../ocr` 后拉取 `GET .../events?modality=ocr`，以时间戳 + 文本 + 置信度列表展示 ocr 模态事件。
+5. `failed / error` 状态展示错误信息并允许返回重新上传。
 
 ## 存储布局
 
@@ -118,20 +165,21 @@ storage/
 │   └── {video_id}/
 │       ├── frame_000000.jpg ...  # 抽帧图片
 │       └── frames.json           # 帧清单（FramesInfo）
-└── outputs/                      # 审核产出（预留，当前无写入方）
+└── outputs/                      # 审核产出
+    └── {video_id}/
+        └── ocr.json              # OCR 事件产出（{video_id, modality, events}）
 ```
 
-## AI 模块规划（现状：仅占位）
+## AI 模块现状
 
-`ai/` 下五个模块目前均只有 README 占位，无任何实现代码：
+`ai/` 下五个模块中，`ai/ocr` 已实现（PP-OCRv6 Provider，见上文「模型选型与 Provider 抽象」）；`ai/asr`、`ai/video`、`ai/vlm`、`ai/risk` 仍只有 README 占位：
 
 - `ai/video`：视频元数据解析与抽帧（当前该能力由后端 `app/services/video` 包承担）
-- `ai/ocr`：画面文字识别
 - `ai/asr`：语音转写
 - `ai/vlm`：视觉语言大模型理解
 - `ai/risk`：多模态风险融合判定
 
-规划中各模态的产出将归一到 `app/schemas/events.py` 定义的 `TimelineEvent`（含 video_id、模态、起止毫秒、内容、置信度），再由风险模块融合判定，结果写入 `storage/outputs/`。
+各模态的产出将归一到 `app/schemas/events.py` 定义的 `TimelineEvent`（含 video_id、模态、起止毫秒、内容、置信度），再由风险模块融合判定，结果写入 `storage/outputs/`。
 
 ## 配置项
 
@@ -147,5 +195,9 @@ storage/
 | `scene_threshold` | `SCENE_THRESHOLD` | `0.4` | 镜头切换检测的场景分数阈值，必须在 (0, 1) 区间 |
 | `scene_max_frames` | `SCENE_MAX_FRAMES` | `500` | 镜头切换检测的最大抽帧数，超出部分截断 |
 | `max_upload_size_mb` | `MAX_UPLOAD_SIZE_MB` | `500` | 上传文件大小上限（MB） |
+| `ocr_primary_model` | `OCR_PRIMARY_MODEL` | `PP-OCRv6` | 主 OCR 模型（PaddleOCR ocr_version） |
+| `ocr_fallback_model` | `OCR_FALLBACK_MODEL` | `PaddleOCR-VL-1.6` | 备用疑难 OCR 模型标识，仅记录不加载 |
+| `ocr_lang` | `OCR_LANG` | `ch` | OCR 识别语言 |
+| `ocr_use_gpu` | `OCR_USE_GPU` | `false` | OCR 是否使用 GPU，默认 CPU |
 
 其他相关配置：CORS 允许来源在 `main.py` 中固定为 `http://localhost:5173` / `http://127.0.0.1:5173`（Vite 开发服务器）；前端 API 地址为 `VITE_API_BASE_URL`（默认空串，走 Vite proxy）。

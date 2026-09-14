@@ -1,6 +1,6 @@
 # AI Comic Review
 
-AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上传视频后自动解析元数据（时长、分辨率、帧率、编码、码率），并按固定帧率（默认 2 FPS）抽取关键帧，前端页面展示视频信息与帧列表。后续将在此基础上接入 OCR、ASR、视觉理解（VLM）与多模态风险融合判定，完成对漫画/视频内容的自动化审核。
+AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上传视频后自动解析元数据（时长、分辨率、帧率、编码、码率），按固定帧率（默认 2 FPS）或镜头切换检测抽取关键帧，并对帧图片执行 OCR（PaddleOCR PP-OCRv6）产出统一时间线事件，前端页面展示视频信息、帧列表与识别结果。后续将在此基础上接入 ASR、视觉理解（VLM）与多模态风险融合判定，完成对漫画/视频内容的自动化审核。
 
 ## 功能
 
@@ -8,12 +8,14 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 - 元数据解析：基于 ffprobe 提取时长、分辨率、帧率、编码格式、码率
 - 关键帧抽取：基于 ffmpeg 按固定帧率抽帧，生成帧图片与 `frames.json` 帧清单（含毫秒级时间戳）
 - 镜头切换检测：可选 scene 采样模式，基于 ffmpeg 场景分数识别镜头边界并逐边界精确抽帧（阈值与帧数上限可配置）
+- 画面文字识别（OCR）：基于 PaddleOCR（主模型 PP-OCRv6）逐帧识别文字，聚合为统一时间线事件（TimelineEvent）并落盘 `ocr.json`；前端一键触发并展示识别结果
 - 状态查询：查询视频任务状态（processing / processed / failed）、帧清单与帧图片
-- 前端页面：拖拽/点选上传、采样模式选择、处理状态轮询、元数据与帧网格展示
+- 前端页面：拖拽/点选上传、采样模式选择、处理状态轮询、元数据与帧网格展示、OCR 事件列表
 
 ## 技术栈
 
 - 后端：Python 3.11、FastAPI、Uvicorn、Pydantic / pydantic-settings、FFmpeg（ffmpeg / ffprobe 命令行）
+- AI：PaddleOCR（主 OCR 模型 PP-OCRv6，CPU 版 paddlepaddle；模型权重首次运行自动下载到用户缓存目录，不进入仓库）
 - 前端：React 18、TypeScript、Vite 5
 - 测试：pytest、FastAPI TestClient（httpx）
 - 部署：docker-compose（后端服务）
@@ -21,29 +23,29 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 ## 目录结构
 
 ```
-├── ai/                     # AI 模块（占位，后续阶段实现）
-│   ├── asr/                #   语音转写
-│   ├── ocr/                #   画面文字识别
-│   ├── risk/               #   多模态风险融合判定
-│   ├── video/              #   视频元数据解析与抽帧
-│   └── vlm/                #   视觉语言大模型理解
+├── ai/                     # AI 模块（多模态能力，Provider 抽象 + 配置驱动）
+│   ├── asr/                #   语音转写（占位）
+│   ├── ocr/                #   画面文字识别：base.py Provider 抽象 + paddleocr.py PP-OCRv6 实现
+│   ├── risk/               #   多模态风险融合判定（占位）
+│   ├── video/              #   视频元数据解析与抽帧（占位，当前由后端 services/video 承担）
+│   └── vlm/                #   视觉语言大模型理解（占位）
 ├── backend/
 │   ├── app/
-│   │   ├── api/            # 路由层：health.py、videos.py
+│   │   ├── api/            # 路由层：health.py、videos.py（上传/查询/OCR/事件）
 │   │   ├── core/           # 配置：config.py（pydantic-settings）
-│   │   ├── schemas/        # 数据模型：video.py、events.py（时间线事件，预留）
-│   │   ├── services/       # 业务层：video/（ffprobe/固定帧率抽帧/镜头切换检测）、registry.py（任务记录落盘）
+│   │   ├── schemas/        # 数据模型：video.py、events.py（统一时间线事件）
+│   │   ├── services/       # 业务层：video/（ffprobe/抽帧/镜头检测）、ocr_pipeline.py（OCR 编排）、registry.py
 │   │   └── main.py         # FastAPI 应用入口
 │   └── requirements.txt
 ├── frontend/
 │   └── src/
 │       ├── api/videos.ts   # 后端 API 封装
-│       ├── components/     # UploadPanel / VideoInfoPanel / FramesGrid
+│       ├── components/     # UploadPanel / VideoInfoPanel / FramesGrid / OcrPanel
 │       └── App.tsx         # 页面状态机（上传 → 处理 → 展示）
 ├── storage/                # 运行时数据（见下文）
 │   ├── uploads/            #   原始视频与任务记录 job.json
 │   ├── frames/             #   抽帧结果 frames/{video_id}/
-│   └── outputs/            #   审核产出（预留）
+│   └── outputs/            #   审核产出 outputs/{video_id}/ocr.json
 ├── tests/                  # pytest 测试
 ├── docker-compose.yml
 ├── pytest.ini
@@ -70,6 +72,8 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 - `GET /api/videos/{video_id}` — 查询任务状态与结果
 - `GET /api/videos/{video_id}/frames` — 帧清单
 - `GET /api/videos/{video_id}/frames/{filename}` — 帧图片
+- `POST /api/videos/{video_id}/ocr` — 对已完成抽帧的视频同步执行 OCR（未抽帧返回 409）
+- `GET /api/videos/{video_id}/events?modality=ocr` — 查询已生成的 OCR 时间线事件
 
 ### 前端（本地）
 
@@ -101,7 +105,9 @@ pip install -r backend/requirements.txt   # 已包含 pytest 与 httpx
 python -m pytest tests/ -v
 ```
 
-说明：测试通过 `STORAGE_DIR` 环境变量隔离到临时目录，不会污染仓库下的 `storage/`；涉及真实 ffmpeg/ffprobe 的用例在本机未安装 FFmpeg 时会自动跳过。
+说明：测试通过 `STORAGE_DIR` 环境变量隔离到临时目录，不会污染仓库下的 `storage/`；涉及真实 ffmpeg/ffprobe 的用例在本机未安装 FFmpeg 时会自动跳过；OCR 引擎集成测试在 paddleocr 未安装时自动跳过（已安装时需联网下载模型权重，首次较慢）。
+
+OCR 说明：引擎为 PaddleOCR 官方包（`paddleocr` + CPU 版 `paddlepaddle`），主模型 PP-OCRv6 由配置 `OCR_PRIMARY_MODEL` 指定；模型权重首次运行自动下载到用户缓存目录（`~/.paddlex`），不会进入仓库。
 
 ## 配置项
 
@@ -116,3 +122,7 @@ python -m pytest tests/ -v
 | `SCENE_THRESHOLD` | `0.4` | 镜头切换检测的场景分数阈值（0, 1 区间） |
 | `SCENE_MAX_FRAMES` | `500` | 镜头切换检测的最大抽帧数，超出截断 |
 | `MAX_UPLOAD_SIZE_MB` | `500` | 上传文件大小上限（MB） |
+| `OCR_PRIMARY_MODEL` | `PP-OCRv6` | 主 OCR 模型（PaddleOCR ocr_version） |
+| `OCR_FALLBACK_MODEL` | `PaddleOCR-VL-1.6` | 备用疑难 OCR 模型标识（仅记录不加载，后续切片接入） |
+| `OCR_LANG` | `ch` | OCR 识别语言 |
+| `OCR_USE_GPU` | `false` | OCR 是否使用 GPU（默认 CPU） |
