@@ -31,12 +31,12 @@ def get_default_provider() -> OcrProvider:
     return _provider
 
 
-def _create_provider() -> OcrProvider:
-    """按配置 ocr_primary_model 选择并实例化具体引擎实现。"""
+def _create_local_provider() -> OcrProvider:
+    """按配置 ocr_primary_model 实例化本地引擎。"""
     settings = get_settings()
     model = settings.ocr_primary_model
     logger.info(
-        "初始化 OCR Provider 模型=%s 语言=%s 设备=%s（首次调用加载模型）",
+        "初始化本地 OCR Provider 模型=%s 语言=%s 设备=%s（首次调用加载模型）",
         model,
         settings.ocr_lang,
         "gpu" if settings.ocr_use_gpu else "cpu",
@@ -46,3 +46,27 @@ def _create_provider() -> OcrProvider:
 
         return PaddleOcrProvider()
     raise ValueError(f"未支持的主 OCR 模型标识：{model}")
+
+
+def _create_provider() -> OcrProvider:
+    """按配置 OCR_PROVIDER 选择本地 PaddleOcrProvider 或远端 RemoteOcrProvider。
+
+    默认 local。OCR_PROVIDER=modal 且未配置端点时回退 local 并记日志。
+    """
+    settings = get_settings()
+    kind = settings.ocr_provider
+    if kind == "modal":
+        if settings.modal_ocr_url:
+            from ai.ocr.remote import RemoteOcrProvider
+
+            logger.info(
+                "初始化远端 OCR Provider 模型=%s 端点=%s",
+                settings.ocr_primary_model,
+                settings.modal_ocr_url,
+            )
+            return RemoteOcrProvider()
+        logger.warning(
+            "OCR_PROVIDER=modal 但未配置 MODAL_OCR_URL，回退本地 PaddleOcrProvider"
+        )
+        return _create_local_provider()
+    return _create_local_provider()

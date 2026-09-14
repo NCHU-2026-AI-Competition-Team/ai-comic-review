@@ -20,7 +20,7 @@ flowchart LR
     end
 
     subgraph AI[ai/ 多模态能力]
-        OCRP[ocr/base.py Provider 抽象<br/>ocr/paddleocr.py PP-OCRv6 实现]
+        OCRP[ocr/base.py Provider 抽象<br/>ocr/paddleocr.py 本地 PP-OCRv6<br/>ocr/remote.py Modal HTTPS 客户端]
         ASRP[asr/base.py Provider 抽象<br/>asr/qwen_asr.py 云端 ASR 客户端]
     end
 
@@ -28,6 +28,7 @@ flowchart LR
         FFP[ffprobe]
         FFM[ffmpeg]
         MODAL[Modal 云端 ASR 服务<br/>Qwen3-ASR-1.7B]
+        MODALOCR[Modal 云端 OCR 服务<br/>PP-OCRv6 + PaddleOCR-VL-1.6]
     end
 
     subgraph 磁盘[storage/]
@@ -41,6 +42,7 @@ flowchart LR
     ROUTE --> SVC
     SVC --> AI
     ASRP -->|HTTPS multipart| MODAL
+    OCRP -->|HTTPS multipart| MODALOCR
     SVC --> FFP
     SVC --> FFM
     SVC --> UPL
@@ -81,8 +83,9 @@ backend/app/
 ai/                    # 多模态能力包（仓库根，经 sys.path/pythonpath 可被 backend 与 pytest 导入）
 ├── ocr/
 │   ├── base.py        #   OcrProvider 抽象基类 + OcrTextLine，业务层只依赖此接口
-│   ├── paddleocr.py   #   PaddleOcrProvider：PP-OCRv6 实现，惰性单例，模型/语言/设备走配置
-│   └── factory.py     #   默认 Provider 入口（按配置分派，业务层不 import 具体实现）
+│   ├── paddleocr.py   #   PaddleOcrProvider：本地 PP-OCRv6 实现，惰性单例，模型/语言/设备走配置
+│   ├── remote.py      #   RemoteOcrProvider：Modal 云端 OCR 的 HTTPS 客户端（httpx），契约解析严格校验
+│   └── factory.py     #   默认 Provider 入口（按 OCR_PROVIDER=local|modal 分派，业务层不 import 具体实现）
 └── asr/
     ├── base.py        #   AsrProvider 抽象 + AsrSegment/AsrResult + 抽象异常（AsrProviderError 等）
     ├── qwen_asr.py    #   QwenAsrProvider：Modal 云端 Qwen3-ASR 的 HTTPS 客户端（httpx），只抛抽象异常
@@ -131,7 +134,8 @@ POST /api/videos/{video_id}/ocr
   ├─ 1. video_id 校验；任务记录不存在 404
   ├─ 2. frames.json 不存在（未抽帧）返回 409 并提示先完成抽帧；损坏返回 500
   ├─ 3. services/ocr_pipeline.run_ocr 同步执行（本阶段不引入任务队列）：
-  │      a. 逐帧调用 ai.ocr 的 OcrProvider.recognize（惰性单例，首次加载模型）
+  │      a. 逐帧调用 ai.ocr 的 OcrProvider.recognize（惰性单例，工厂按
+  │         OCR_PROVIDER 选择本地 PaddleOcrProvider 或 RemoteOcrProvider）
   │      b. 每帧文字行聚合为 TimelineEvent：modality='ocr'，
   │         start_ms=end_ms=帧的 timestamp_ms（与抽帧时间轴严格对齐，
   │         供后续 ASR/视觉/VLM 事件在同一时间轴上融合）；
@@ -147,7 +151,9 @@ GET /api/videos/{video_id}/events?modality=ocr
      未生成 404，文件损坏 500；modality 取值受枚举校验（ocr/asr/vision/vlm）
 ```
 
-OCR 引擎依赖（paddleocr/paddlepaddle）只在 `ai/ocr/paddleocr.py` 内延迟导入，未安装 OCR 环境时后端其余功能与测试照常运行。Windows 环境下 paddle 与 torch 共存时必须先导入 torch（否则 torch 的 shm.dll 解析失败拖垮 modelscope → paddlex → paddleocr 导入链），该约束已在 `ai/ocr/paddleocr.py` 内处理并注释。
+OCR 部署形态由 `OCR_PROVIDER`（默认 `local`）决定：`local` 走 `ai/ocr/paddleocr.py` 的 PaddleOcrProvider（PaddleOCR 官方包，默认 CPU）；`modal` 走 `ai/ocr/remote.py` 的 RemoteOcrProvider，以 multipart 上传 JPEG 到 `POST {MODAL_OCR_URL}/recognize`（表单字段 `model` 携带模型标识），响应 `{"lines":[{text,bbox,confidence}]}` 经严格解析（缺 `lines`/行字段、bbox 非四角坐标列表、置信度非有限数值均抛 `OcrResponseFormatError`）；超时抛 `OcrTimeoutError`，网络错误与非 2xx 抛 `OcrServiceError`。`OCR_PROVIDER=modal` 但 `MODAL_OCR_URL` 为空时工厂回退 local 并记警告日志。云端服务部署见 `modal/ocr/`：主模型 PP-OCRv6（T4），PaddleOCR-VL-1.6 仅在已检出文字且最低置信度低于阈值时同容器调用；空图返回空 `lines`，畸形输入 4xx。`MODAL_OCR_URL` 配置层要求生产端点为 https，禁止 URL 凭据，仅 `http://127.0.0.1` / `http://localhost` 作为本地测试 stub。
+
+OCR 引擎依赖（paddleocr/paddlepaddle）只在 `ai/ocr/paddleocr.py` 内延迟导入，未安装 OCR 环境时后端其余功能与测试照常运行。Windows 环境下 paddle 与 torch 共存时必须先导入 torch（否则 torch 的 shm.dll 解析失败拖垮 modelscope → paddlex → paddleocr 导入链），该约束已在 `ai/ocr/paddleocr.py` 内处理并注释。远端 Provider 不加载这些依赖。
 
 ## ASR 分支：Video → Audio → 云端 ASR → TimelineEvent(asr)
 
@@ -192,7 +198,7 @@ GET /api/videos/{video_id}/events?modality=asr
 
 多模态能力的统一约定：每个模态在 `ai/{modality}/base.py` 定义 Provider 抽象（输入输出契约），具体引擎以同接口实现并惰性加载，模型标识全部走 `core/config.py` 配置（禁止散落在业务代码）；业务编排只依赖 base 抽象，更换引擎不影响编排与路由。
 
-- OCR：主模型 PP-OCRv6（`ai/ocr/paddleocr.py` 的 PaddleOcrProvider，PaddleOCR 官方包，默认 CPU）；备用疑难模型 PaddleOCR-VL 仅由配置记录标识（`ocr_fallback_model`），后续切片以同接口接入，当前不落任何占位实现。模型名、语言、设备见配置项表的 `ocr_*` 项。
+- OCR：主模型 PP-OCRv6。`OCR_PROVIDER=local`（默认）使用 `ai/ocr/paddleocr.py` 的 PaddleOcrProvider（PaddleOCR 官方包，默认 CPU）；`OCR_PROVIDER=modal` 使用 `ai/ocr/remote.py` 的 RemoteOcrProvider（HTTPS 客户端，本地不加载 OCR 权重）。备用疑难模型 PaddleOCR-VL-1.6 由配置 `ocr_fallback_model` 记录标识，在 Modal 云端服务内于低置信时调用（`modal/ocr/`），本地 Provider 不加载。模型名、语言、设备、端点见配置项表的 `ocr_*` / `modal_ocr_url` 项。
 - ASR：主模型 Qwen3-ASR-1.7B，部署在 Modal 云端（`ai/asr/qwen_asr.py` 的 QwenAsrProvider 为 HTTPS 客户端，本地不加载模型权重）；时间戳对齐模型 Qwen3-ForcedAligner-0.6B 由云端服务内部使用，本地仅以 `asr_aligner_model` 记录标识。端点、模型名、超时见配置项表的 `modal_asr_url` / `asr_*` 项。
 - 视觉 / VLM / 风险融合：尚未实现，接入时遵循同一 Provider 约定（base 抽象 + 配置驱动 + 惰性加载），产出统一归一到 TimelineEvent。
 
@@ -253,9 +259,12 @@ storage/
 | `scene_max_frames` | `SCENE_MAX_FRAMES` | `500` | 镜头切换检测的最大抽帧数，超出部分截断 |
 | `max_upload_size_mb` | `MAX_UPLOAD_SIZE_MB` | `500` | 上传文件大小上限（MB） |
 | `ocr_primary_model` | `OCR_PRIMARY_MODEL` | `PP-OCRv6` | 主 OCR 模型（PaddleOCR ocr_version） |
-| `ocr_fallback_model` | `OCR_FALLBACK_MODEL` | `PaddleOCR-VL-1.6` | 备用疑难 OCR 模型标识，仅记录不加载 |
+| `ocr_fallback_model` | `OCR_FALLBACK_MODEL` | `PaddleOCR-VL-1.6` | 备用疑难 OCR 模型标识；云端服务低置信时调用，本地不加载 |
 | `ocr_lang` | `OCR_LANG` | `ch` | OCR 识别语言 |
-| `ocr_use_gpu` | `OCR_USE_GPU` | `false` | OCR 是否使用 GPU，默认 CPU |
+| `ocr_use_gpu` | `OCR_USE_GPU` | `false` | OCR 是否使用 GPU，默认 CPU（仅 local 形态） |
+| `ocr_provider` | `OCR_PROVIDER` | `local` | OCR 部署形态：`local` 或 `modal` |
+| `modal_ocr_url` | `MODAL_OCR_URL` | 空 | Modal 云端 OCR 服务 HTTPS 地址（不含路径）；`OCR_PROVIDER=modal` 且为空时工厂回退 local；禁止凭据，本地 stub 允许 http://127.0.0.1 / http://localhost |
+| `ocr_request_timeout_seconds` | `OCR_REQUEST_TIMEOUT_SECONDS` | `120` | 云端 OCR 服务请求超时（秒），必须大于 0 |
 | `modal_asr_url` | `MODAL_ASR_URL` | 空 | Modal 云端 ASR 服务 HTTPS 地址（不含路径），未配置时 ASR 不可用；禁止凭据，本地 stub 允许 http://127.0.0.1 / http://localhost |
 | `asr_primary_model` | `ASR_PRIMARY_MODEL` | `Qwen3-ASR-1.7B` | 主 ASR 模型标识 |
 | `asr_aligner_model` | `ASR_ALIGNER_MODEL` | `Qwen3-ForcedAligner-0.6B` | 时间戳对齐模型标识，仅记录不加载，云端服务内部使用 |

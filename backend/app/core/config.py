@@ -13,6 +13,27 @@ _LOCAL_HTTP_HOSTS = {"127.0.0.1", "localhost"}
 ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
+def _validate_modal_service_url(value: str, env_name: str) -> str:
+    """空值表示未配置；生产端点必须 https，仅允许本地 http stub，禁止 URL 凭据。"""
+    url = (value or "").strip()
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{env_name} 禁止携带用户名或密码")
+    scheme = (parsed.scheme or "").lower()
+    host = (parsed.hostname or "").lower()
+    if not scheme or not parsed.netloc:
+        raise ValueError(f"{env_name} 必须是含 scheme 的绝对 URL")
+    if scheme == "https":
+        return url
+    if scheme == "http" and host in _LOCAL_HTTP_HOSTS:
+        return url
+    raise ValueError(
+        f"{env_name} 必须使用 https（本地测试 stub 允许 http://127.0.0.1 或 http://localhost）"
+    )
+
+
 class Settings(BaseSettings):
     """全局配置项，均可通过同名环境变量或 .env 文件覆盖。"""
 
@@ -29,36 +50,38 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 500
     # OCR 模型配置（ai/ocr 使用，模型标识不散落在业务代码）
     ocr_primary_model: str = Field(default="PP-OCRv6", description="主 OCR 模型（PaddleOCR ocr_version）")
-    ocr_fallback_model: str = Field(default="PaddleOCR-VL-1.6", description="备用疑难 OCR 模型标识，仅记录不加载，后续切片接入")
+    ocr_fallback_model: str = Field(
+        default="PaddleOCR-VL-1.6",
+        description="备用疑难 OCR 模型标识；云端服务在低置信时调用，本地 Provider 不加载",
+    )
     ocr_lang: str = Field(default="ch", description="OCR 识别语言")
     ocr_use_gpu: bool = Field(default=False, description="OCR 是否使用 GPU，默认 CPU")
+    ocr_provider: str = Field(default="local", description="OCR 部署形态：local 本地 PaddleOCR，modal 云端 HTTPS")
+    modal_ocr_url: str = Field(default="", description="Modal 云端 OCR 服务地址（不含路径），未配置时 modal 形态回退 local")
+    ocr_request_timeout_seconds: float = Field(default=120.0, gt=0, description="云端 OCR 服务请求超时（秒）")
     # ASR 配置（ai/asr 使用）：ASR 推理全部在 Modal 云端，本地仅提取音频并 HTTPS 调用
     modal_asr_url: str = Field(default="", description="Modal 云端 ASR 服务地址（不含路径），未配置时 ASR 不可用")
     asr_primary_model: str = Field(default="Qwen3-ASR-1.7B", description="主 ASR 模型标识")
     asr_aligner_model: str = Field(default="Qwen3-ForcedAligner-0.6B", description="时间戳对齐模型标识，仅记录不加载，云端服务内部使用")
     asr_request_timeout_seconds: float = Field(default=120.0, gt=0, description="云端 ASR 服务请求超时（秒）")
 
+    @field_validator("ocr_provider")
+    @classmethod
+    def _validate_ocr_provider(cls, value: str) -> str:
+        name = (value or "local").strip().lower()
+        if name not in {"local", "modal"}:
+            raise ValueError("OCR_PROVIDER 仅允许 local 或 modal")
+        return name
+
+    @field_validator("modal_ocr_url")
+    @classmethod
+    def _validate_modal_ocr_url(cls, value: str) -> str:
+        return _validate_modal_service_url(value, "MODAL_OCR_URL")
+
     @field_validator("modal_asr_url")
     @classmethod
     def _validate_modal_asr_url(cls, value: str) -> str:
-        """空值表示未配置；生产端点必须 https，仅允许本地 http stub，禁止 URL 凭据。"""
-        url = (value or "").strip()
-        if not url:
-            return ""
-        parsed = urlparse(url)
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError("MODAL_ASR_URL 禁止携带用户名或密码")
-        scheme = (parsed.scheme or "").lower()
-        host = (parsed.hostname or "").lower()
-        if not scheme or not parsed.netloc:
-            raise ValueError("MODAL_ASR_URL 必须是含 scheme 的绝对 URL")
-        if scheme == "https":
-            return url
-        if scheme == "http" and host in _LOCAL_HTTP_HOSTS:
-            return url
-        raise ValueError(
-            "MODAL_ASR_URL 必须使用 https（本地测试 stub 允许 http://127.0.0.1 或 http://localhost）"
-        )
+        return _validate_modal_service_url(value, "MODAL_ASR_URL")
 
     @property
     def storage_path(self) -> Path:
