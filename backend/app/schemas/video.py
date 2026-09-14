@@ -83,6 +83,22 @@ class VideoJob(BaseModel):
     filename: str
     status: VideoStatus = "processing"
     sampling: SamplingMode = "fixed_fps"
+    frame_fps: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="任务级固定帧率抽帧覆盖；未提供时抽帧回退全局 FRAME_EXTRACTION_FPS",
+    )
+    scene_threshold: Optional[float] = Field(
+        default=None,
+        gt=0,
+        lt=1,
+        description="任务级镜头检测阈值覆盖；未提供时抽帧回退全局 SCENE_THRESHOLD",
+    )
+    scene_max_frames: Optional[int] = Field(
+        default=None,
+        gt=0,
+        description="任务级镜头检测最大帧数覆盖；未提供时抽帧回退全局 SCENE_MAX_FRAMES",
+    )
     error: Optional[str] = Field(default=None, description="处理失败时的错误信息")
     metadata: Optional[VideoMetadata] = None
     frames: Optional[FramesInfo] = None

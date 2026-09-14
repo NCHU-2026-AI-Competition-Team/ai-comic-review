@@ -10,6 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.schemas.video import FramesInfo, SamplingInfo, VideoJob, VideoMetadata
 from app.services import registry, video
 from app.services.video import scene
 
@@ -302,3 +303,145 @@ def test_upload_video_scene_sampling_end_to_end(tmp_path: Path, monkeypatch: pyt
     frames_response = client.get(f"/api/videos/{video_id}/frames")
     assert frames_response.status_code == 200
     assert frames_response.json()["sampling"]["method"] == "scene_change"
+
+
+def test_extract_scene_frames_uses_explicit_threshold_and_max_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """显式传入 threshold / max_frames 时覆盖全局配置，并写入 frames.json。"""
+    _isolate_storage(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCENE_THRESHOLD", "0.4")
+    monkeypatch.setenv("SCENE_MAX_FRAMES", "500")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+
+    captured: dict[str, object] = {}
+
+    def fake_detect(path: Path, threshold: float, max_boundaries=None):
+        captured["threshold"] = threshold
+        captured["max_boundaries"] = max_boundaries
+        return list(range(1000, 5000, 1000))
+
+    monkeypatch.setattr(scene, "detect_scene_changes", fake_detect)
+    monkeypatch.setattr(scene, "_require_tool", lambda name: name)
+    monkeypatch.setattr(
+        scene,
+        "_extract_single_frame",
+        lambda ffmpeg, video_path, timestamp_ms, dest: dest.write_bytes(b"\xff\xd8\xff"),
+    )
+
+    info = scene.extract_scene_frames(
+        VIDEO_ID, Path("dummy.mp4"), threshold=0.15, max_frames=3
+    )
+    assert captured["threshold"] == pytest.approx(0.15)
+    assert captured["max_boundaries"] == 2
+    assert info.count == 3
+    assert info.sampling.threshold == pytest.approx(0.15)
+
+
+def test_process_video_uses_job_scene_overrides(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """process_video 将任务级 scene_threshold / scene_max_frames 传给镜头抽帧。"""
+    _isolate_storage(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCENE_THRESHOLD", "0.4")
+    monkeypatch.setenv("SCENE_MAX_FRAMES", "500")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    uploads = get_settings().uploads_path
+    uploads.mkdir(parents=True, exist_ok=True)
+    (uploads / f"{VIDEO_ID}.mp4").write_bytes(b"fake-mp4")
+    registry.save_job(
+        VideoJob(
+            video_id=VIDEO_ID,
+            filename="scenes.mp4",
+            sampling="scene",
+            scene_threshold=0.2,
+            scene_max_frames=7,
+        )
+    )
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(video, "probe_metadata", lambda path: VideoMetadata())
+
+    def fake_extract(video_id: str, video_path: Path, threshold=None, max_frames=None):
+        captured["threshold"] = threshold
+        captured["max_frames"] = max_frames
+        return FramesInfo(
+            sampling=SamplingInfo(method="scene_change", threshold=threshold),
+            count=0,
+            frames=[],
+        )
+
+    monkeypatch.setattr(scene, "extract_scene_frames", fake_extract)
+    video.process_video(VIDEO_ID, sampling="scene")
+    assert captured["threshold"] == pytest.approx(0.2)
+    assert captured["max_frames"] == 7
+
+
+def test_process_video_scene_falls_back_to_global(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未提供镜头覆盖参数时 process_video 使用全局 SCENE_* 配置。"""
+    _isolate_storage(tmp_path, monkeypatch)
+    monkeypatch.setenv("SCENE_THRESHOLD", "0.35")
+    monkeypatch.setenv("SCENE_MAX_FRAMES", "42")
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    uploads = get_settings().uploads_path
+    uploads.mkdir(parents=True, exist_ok=True)
+    (uploads / f"{VIDEO_ID}.mp4").write_bytes(b"fake-mp4")
+    registry.save_job(VideoJob(video_id=VIDEO_ID, filename="scenes.mp4", sampling="scene"))
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(video, "probe_metadata", lambda path: VideoMetadata())
+
+    def fake_extract(video_id: str, video_path: Path, threshold=None, max_frames=None):
+        captured["threshold"] = threshold
+        captured["max_frames"] = max_frames
+        return FramesInfo(
+            sampling=SamplingInfo(method="scene_change", threshold=threshold),
+            count=0,
+            frames=[],
+        )
+
+    monkeypatch.setattr(scene, "extract_scene_frames", fake_extract)
+    video.process_video(VIDEO_ID, sampling="scene")
+    assert captured["threshold"] == pytest.approx(0.35)
+    assert captured["max_frames"] == 42
+
+
+@requires_ffmpeg
+def test_upload_scene_overrides_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """API 级：scene_threshold / scene_max_frames 覆盖生效并回显。"""
+    _isolate_storage(tmp_path, monkeypatch)
+    video_file = tmp_path / "scenes.mp4"
+    _make_scene_test_video(video_file)
+
+    with video_file.open("rb") as f:
+        response = client.post(
+            "/api/videos",
+            files={"file": ("scenes.mp4", f, "video/mp4")},
+            data={
+                "sampling": "scene",
+                "scene_threshold": "0.3",
+                "scene_max_frames": "1",
+            },
+        )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["status"] == "processed"
+    assert payload["frames"]["sampling"]["threshold"] == pytest.approx(0.3)
+    assert payload["frames"]["count"] == 1
+
+    video_id = payload["video_id"]
+    job = registry.get_job(video_id)
+    assert job is not None
+    assert job.scene_threshold == pytest.approx(0.3)
+    assert job.scene_max_frames == 1
+    echoed = client.get(f"/api/videos/{video_id}").json()
+    assert echoed["scene_threshold"] == pytest.approx(0.3)
+    assert echoed["scene_max_frames"] == 1

@@ -2,10 +2,12 @@
 
 import json
 import logging
+import math
 import re
 import sys
 import uuid
 from pathlib import Path
+from typing import Optional
 
 from fastapi import APIRouter, Form, HTTPException, Query, UploadFile, Request, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -79,6 +81,80 @@ def _validate_sampling(sampling: str) -> SamplingMode:
     return sampling  # type: ignore[return-value]
 
 
+def _blank_to_none(value: Optional[str]) -> Optional[str]:
+    """把缺失或空白表单值视为未提供。"""
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped if stripped else None
+
+
+def _parse_optional_positive_float(raw: Optional[str], field: str) -> Optional[float]:
+    """解析可选正浮点；非数或 ≤0 返回 422 中文错误。"""
+    text = _blank_to_none(raw)
+    if text is None:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{field} 必须是大于 0 的数字") from None
+    if not math.isfinite(value) or value <= 0:
+        raise HTTPException(status_code=422, detail=f"{field} 必须是大于 0 的数字")
+    return value
+
+
+def _parse_optional_open_unit_interval(raw: Optional[str], field: str) -> Optional[float]:
+    """解析可选 (0, 1) 开区间浮点；非数或越界返回 422 中文错误。"""
+    text = _blank_to_none(raw)
+    if text is None:
+        return None
+    try:
+        value = float(text)
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"{field} 必须是 (0, 1) 区间内的数字") from None
+    if not math.isfinite(value) or not (0 < value < 1):
+        raise HTTPException(status_code=422, detail=f"{field} 必须是 (0, 1) 区间内的数字")
+    return value
+
+
+def _parse_optional_positive_int(raw: Optional[str], field: str) -> Optional[int]:
+    """解析可选正整数；非整数或 ≤0 返回 422 中文错误。"""
+    text = _blank_to_none(raw)
+    if text is None:
+        return None
+    if re.fullmatch(r"[+-]?\d+", text) is None:
+        raise HTTPException(status_code=422, detail=f"{field} 必须是大于 0 的整数")
+    value = int(text)
+    if value <= 0:
+        raise HTTPException(status_code=422, detail=f"{field} 必须是大于 0 的整数")
+    return value
+
+
+def _validate_sampling_overrides(
+    sampling: SamplingMode,
+    frame_fps_raw: Optional[str],
+    scene_threshold_raw: Optional[str],
+    scene_max_frames_raw: Optional[str],
+) -> tuple[Optional[float], Optional[float], Optional[int]]:
+    """校验任务级采样覆盖字段：非法值或与采样模式不匹配时 422。
+
+    未提供（缺省或空白）返回 None，抽帧时回退全局配置。
+    """
+    frame_fps = _parse_optional_positive_float(frame_fps_raw, "frame_fps")
+    scene_threshold = _parse_optional_open_unit_interval(scene_threshold_raw, "scene_threshold")
+    scene_max_frames = _parse_optional_positive_int(scene_max_frames_raw, "scene_max_frames")
+
+    if sampling == "fixed_fps":
+        if scene_threshold is not None:
+            raise HTTPException(status_code=422, detail="scene_threshold 仅在 sampling=scene 时有效")
+        if scene_max_frames is not None:
+            raise HTTPException(status_code=422, detail="scene_max_frames 仅在 sampling=scene 时有效")
+    else:
+        if frame_fps is not None:
+            raise HTTPException(status_code=422, detail="frame_fps 仅在 sampling=fixed_fps 时有效")
+    return frame_fps, scene_threshold, scene_max_frames
+
+
 def _try_process(video_id: str, sampling: SamplingMode) -> None:
     """尝试触发视频处理流水线。
 
@@ -115,7 +191,13 @@ def _save_upload(file: UploadFile, dest: Path, max_bytes: int) -> None:
 
 
 @router.post("", response_model=VideoUploadResponse, status_code=201)
-def upload_video(file: UploadFile, sampling: str = Form("fixed_fps")) -> VideoUploadResponse:
+def upload_video(
+    file: UploadFile,
+    sampling: str = Form("fixed_fps"),
+    frame_fps: Optional[str] = Form(None),
+    scene_threshold: Optional[str] = Form(None),
+    scene_max_frames: Optional[str] = Form(None),
+) -> VideoUploadResponse:
     """上传视频：校验格式、保存原始文件、落盘任务记录并尝试触发处理。"""
     original_name = file.filename or ""
     ext = Path(original_name).suffix.lower()
@@ -125,6 +207,9 @@ def upload_video(file: UploadFile, sampling: str = Form("fixed_fps")) -> VideoUp
             detail=f"不支持的视频格式 '{ext}'，仅允许 {sorted(ALLOWED_EXTENSIONS)}",
         )
     sampling_mode = _validate_sampling(sampling)
+    override_fps, override_threshold, override_max_frames = _validate_sampling_overrides(
+        sampling_mode, frame_fps, scene_threshold, scene_max_frames
+    )
 
     settings = get_settings()
     video_id = str(uuid.uuid4())
@@ -132,7 +217,16 @@ def upload_video(file: UploadFile, sampling: str = Form("fixed_fps")) -> VideoUp
     settings.uploads_path.mkdir(parents=True, exist_ok=True)
     _save_upload(file, dest, max_bytes=settings.max_upload_size_mb * 1024 * 1024)
 
-    job = registry.save_job(VideoJob(video_id=video_id, filename=original_name, sampling=sampling_mode))
+    job = registry.save_job(
+        VideoJob(
+            video_id=video_id,
+            filename=original_name,
+            sampling=sampling_mode,
+            frame_fps=override_fps,
+            scene_threshold=override_threshold,
+            scene_max_frames=override_max_frames,
+        )
+    )
 
     try:
         _try_process(video_id, sampling_mode)

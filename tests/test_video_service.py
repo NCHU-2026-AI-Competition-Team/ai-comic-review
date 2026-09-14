@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.schemas.video import FramesInfo, SamplingInfo, VideoJob, VideoMetadata
 from app.services import registry, video
 
 client = TestClient(app)
@@ -226,3 +227,107 @@ def test_upload_rejects_bad_extension() -> None:
         files={"file": ("notes.txt", b"not a video", "text/plain")},
     )
     assert response.status_code == 400
+
+
+PROCESS_VIDEO_ID = "12345678-1234-1234-1234-1234567890ab"
+
+
+def _prepare_uploaded_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    **job_fields: object,
+) -> str:
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    uploads = get_settings().uploads_path
+    uploads.mkdir(parents=True, exist_ok=True)
+    (uploads / f"{PROCESS_VIDEO_ID}.mp4").write_bytes(b"fake-mp4")
+    registry.save_job(
+        VideoJob(video_id=PROCESS_VIDEO_ID, filename="clip.mp4", **job_fields)  # type: ignore[arg-type]
+    )
+    return PROCESS_VIDEO_ID
+
+
+def test_process_video_uses_job_frame_fps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """任务记录中的 frame_fps 覆盖全局 FRAME_EXTRACTION_FPS。"""
+    monkeypatch.setenv("FRAME_EXTRACTION_FPS", "2.0")
+    video_id = _prepare_uploaded_job(tmp_path, monkeypatch, frame_fps=5.0)
+    captured: dict[str, float] = {}
+
+    monkeypatch.setattr(video, "probe_metadata", lambda path: VideoMetadata(width=320))
+
+    def fake_extract(vid: str, path: Path, fps: float) -> FramesInfo:
+        captured["fps"] = fps
+        return FramesInfo(
+            sampling=SamplingInfo(method="fixed_fps", fps=fps),
+            count=0,
+            frames=[],
+        )
+
+    monkeypatch.setattr(video, "extract_frames", fake_extract)
+    video.process_video(video_id, sampling="fixed_fps")
+    assert captured["fps"] == pytest.approx(5.0)
+    job = registry.get_job(video_id)
+    assert job is not None and job.frames is not None
+    assert job.frames.sampling.fps == pytest.approx(5.0)
+
+
+def test_process_video_falls_back_to_global_frame_fps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未提供 frame_fps 时抽帧使用全局 FRAME_EXTRACTION_FPS。"""
+    monkeypatch.setenv("FRAME_EXTRACTION_FPS", "3.5")
+    video_id = _prepare_uploaded_job(tmp_path, monkeypatch)
+    captured: dict[str, float] = {}
+
+    monkeypatch.setattr(video, "probe_metadata", lambda path: VideoMetadata())
+
+    def fake_extract(vid: str, path: Path, fps: float) -> FramesInfo:
+        captured["fps"] = fps
+        return FramesInfo(
+            sampling=SamplingInfo(method="fixed_fps", fps=fps),
+            count=0,
+            frames=[],
+        )
+
+    monkeypatch.setattr(video, "extract_frames", fake_extract)
+    video.process_video(video_id, sampling="fixed_fps")
+    assert captured["fps"] == pytest.approx(3.5)
+
+
+@requires_ffmpeg
+def test_upload_frame_fps_override_end_to_end(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上传时覆盖 frame_fps=1，2 秒视频应抽出约 2 帧，frames.json 记录生效帧率。"""
+    monkeypatch.setenv("STORAGE_DIR", str(tmp_path))
+    from app.core.config import get_settings
+
+    get_settings.cache_clear()
+    video_file = tmp_path / "clip.mp4"
+    _make_test_video(video_file, duration=2.0)
+
+    with video_file.open("rb") as f:
+        response = client.post(
+            "/api/videos",
+            files={"file": ("clip.mp4", f, "video/mp4")},
+            data={"sampling": "fixed_fps", "frame_fps": "1"},
+        )
+    assert response.status_code == 201, response.text
+    payload = response.json()
+    assert payload["status"] == "processed"
+    assert payload["frames"]["sampling"]["fps"] == pytest.approx(1.0)
+    assert payload["frames"]["count"] == 2
+
+    video_id = payload["video_id"]
+    job = registry.get_job(video_id)
+    assert job is not None
+    assert job.frame_fps == pytest.approx(1.0)
+    echoed = client.get(f"/api/videos/{video_id}").json()
+    assert echoed["frame_fps"] == pytest.approx(1.0)
+    frames = client.get(f"/api/videos/{video_id}/frames").json()
+    assert frames["sampling"]["fps"] == pytest.approx(1.0)

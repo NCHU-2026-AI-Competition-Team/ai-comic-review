@@ -183,8 +183,16 @@ def _find_uploaded_file(video_id: str) -> Path:
         raise RuntimeError(f"找不到 video_id={video_id} 对应的上传文件") from exc
 
 
+def _resolve_optional(job_value: Optional[float], fallback: float) -> float:
+    """任务级覆盖优先；未设置时回退全局配置。"""
+    return fallback if job_value is None else job_value
+
+
 def process_video(video_id: str, sampling: SamplingMode = "fixed_fps") -> None:
-    """处理已上传的视频：解析元数据、按采样模式抽帧并更新任务状态。"""
+    """处理已上传的视频：解析元数据、按采样模式抽帧并更新任务状态。
+
+    抽帧参数优先级：任务记录中的覆盖值 > 全局配置。
+    """
     settings = get_settings()
     video_path = _find_uploaded_file(video_id)
 
@@ -192,12 +200,28 @@ def process_video(video_id: str, sampling: SamplingMode = "fixed_fps") -> None:
     registry.update_job(video_id, metadata=metadata)
     logger.info("元数据解析完成 video_id=%s metadata=%s", video_id, metadata)
 
+    job = registry.get_job(video_id)
     if sampling == "scene":
         # 延迟导入避免包内循环依赖（scene 复用本模块的 ffmpeg 工具函数）
         from app.services.video.scene import extract_scene_frames
 
-        frames = extract_scene_frames(video_id, video_path)
+        threshold = _resolve_optional(
+            job.scene_threshold if job is not None else None,
+            settings.scene_threshold,
+        )
+        max_frames_override = job.scene_max_frames if job is not None else None
+        max_frames = settings.scene_max_frames if max_frames_override is None else max_frames_override
+        frames = extract_scene_frames(
+            video_id,
+            video_path,
+            threshold=threshold,
+            max_frames=max_frames,
+        )
     else:
-        frames = extract_frames(video_id, video_path, fps=settings.frame_extraction_fps)
+        fps = _resolve_optional(
+            job.frame_fps if job is not None else None,
+            settings.frame_extraction_fps,
+        )
+        frames = extract_frames(video_id, video_path, fps=fps)
     registry.update_job(video_id, status="processed", frames=frames)
     logger.info("抽帧完成 video_id=%s sampling=%s count=%d", video_id, sampling, frames.count)

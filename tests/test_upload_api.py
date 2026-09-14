@@ -117,6 +117,158 @@ def test_upload_rejects_invalid_sampling(client: TestClient) -> None:
     assert list(settings.uploads_path.glob("*/job.json")) == []
 
 
+def _stub_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_process(video_id: str, sampling: str = "fixed_fps") -> None:
+        registry.update_job(video_id, status="processed")
+
+    monkeypatch.setattr(video_service, "process_video", fake_process)
+
+
+def test_upload_frame_fps_override_persisted_and_echoed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """frame_fps 覆盖写入任务记录，GET /api/videos/{id} 回显。"""
+    _stub_process(monkeypatch)
+    response = client.post(
+        "/api/videos",
+        files={"file": ("clip.mp4", io.BytesIO(FAKE_MP4), "video/mp4")},
+        data={"sampling": "fixed_fps", "frame_fps": "5"},
+    )
+    assert response.status_code == 201, response.text
+    video_id = response.json()["video_id"]
+    job = registry.get_job(video_id)
+    assert job is not None
+    assert job.frame_fps == pytest.approx(5.0)
+    assert job.scene_threshold is None
+    assert job.scene_max_frames is None
+
+    echoed = client.get(f"/api/videos/{video_id}")
+    assert echoed.status_code == 200
+    payload = echoed.json()
+    assert payload["frame_fps"] == pytest.approx(5.0)
+    assert payload["scene_threshold"] is None
+    assert payload["scene_max_frames"] is None
+
+
+def test_upload_scene_threshold_override_persisted_and_echoed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scene_threshold 覆盖写入任务记录，GET 回显。"""
+    _stub_process(monkeypatch)
+    response = client.post(
+        "/api/videos",
+        files={"file": ("clip.mp4", io.BytesIO(FAKE_MP4), "video/mp4")},
+        data={"sampling": "scene", "scene_threshold": "0.25"},
+    )
+    assert response.status_code == 201, response.text
+    video_id = response.json()["video_id"]
+    job = registry.get_job(video_id)
+    assert job is not None
+    assert job.sampling == "scene"
+    assert job.scene_threshold == pytest.approx(0.25)
+    assert job.frame_fps is None
+
+    echoed = client.get(f"/api/videos/{video_id}").json()
+    assert echoed["scene_threshold"] == pytest.approx(0.25)
+    assert echoed["scene_max_frames"] is None
+    assert echoed["frame_fps"] is None
+
+
+def test_upload_scene_max_frames_override_persisted_and_echoed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """scene_max_frames 覆盖写入任务记录，GET 回显。"""
+    _stub_process(monkeypatch)
+    response = client.post(
+        "/api/videos",
+        files={"file": ("clip.mp4", io.BytesIO(FAKE_MP4), "video/mp4")},
+        data={"sampling": "scene", "scene_max_frames": "12"},
+    )
+    assert response.status_code == 201, response.text
+    video_id = response.json()["video_id"]
+    job = registry.get_job(video_id)
+    assert job is not None
+    assert job.scene_max_frames == 12
+    assert job.scene_threshold is None
+
+    echoed = client.get(f"/api/videos/{video_id}").json()
+    assert echoed["scene_max_frames"] == 12
+    assert echoed["scene_threshold"] is None
+
+
+def test_upload_omitted_overrides_fallback_to_global(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未提供覆盖字段时任务记录为 null，向后兼容现有调用。"""
+    _stub_process(monkeypatch)
+    response = _upload(client)
+    assert response.status_code == 201, response.text
+    video_id = response.json()["video_id"]
+    job = registry.get_job(video_id)
+    assert job is not None
+    assert job.frame_fps is None
+    assert job.scene_threshold is None
+    assert job.scene_max_frames is None
+
+    echoed = client.get(f"/api/videos/{video_id}").json()
+    assert echoed["frame_fps"] is None
+    assert echoed["scene_threshold"] is None
+    assert echoed["scene_max_frames"] is None
+
+
+def test_upload_empty_override_fields_treated_as_omitted(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空白覆盖字段视为未提供，回退全局配置。"""
+    _stub_process(monkeypatch)
+    response = client.post(
+        "/api/videos",
+        files={"file": ("clip.mp4", io.BytesIO(FAKE_MP4), "video/mp4")},
+        data={"sampling": "fixed_fps", "frame_fps": "  "},
+    )
+    assert response.status_code == 201, response.text
+    job = registry.get_job(response.json()["video_id"])
+    assert job is not None and job.frame_fps is None
+
+
+@pytest.mark.parametrize(
+    ("form", "needle"),
+    [
+        ({"sampling": "fixed_fps", "frame_fps": "abc"}, "frame_fps"),
+        ({"sampling": "fixed_fps", "frame_fps": "0"}, "frame_fps"),
+        ({"sampling": "fixed_fps", "frame_fps": "-1.5"}, "frame_fps"),
+        ({"sampling": "scene", "scene_threshold": "xyz"}, "scene_threshold"),
+        ({"sampling": "scene", "scene_threshold": "0"}, "scene_threshold"),
+        ({"sampling": "scene", "scene_threshold": "1"}, "scene_threshold"),
+        ({"sampling": "scene", "scene_threshold": "1.5"}, "scene_threshold"),
+        ({"sampling": "scene", "scene_max_frames": "1.5"}, "scene_max_frames"),
+        ({"sampling": "scene", "scene_max_frames": "0"}, "scene_max_frames"),
+        ({"sampling": "scene", "scene_max_frames": "-3"}, "scene_max_frames"),
+        ({"sampling": "scene", "scene_max_frames": "abc"}, "scene_max_frames"),
+        ({"sampling": "fixed_fps", "scene_threshold": "0.4"}, "scene_threshold"),
+        ({"sampling": "fixed_fps", "scene_max_frames": "10"}, "scene_max_frames"),
+        ({"sampling": "scene", "frame_fps": "2"}, "frame_fps"),
+    ],
+)
+def test_upload_rejects_invalid_sampling_overrides(
+    client: TestClient, form: dict[str, str], needle: str
+) -> None:
+    """非法值、越界或与采样模式不匹配的覆盖字段返回 422 中文错误，且不落盘。"""
+    response = client.post(
+        "/api/videos",
+        files={"file": ("clip.mp4", io.BytesIO(FAKE_MP4), "video/mp4")},
+        data=form,
+    )
+    assert response.status_code == 422, response.text
+    detail = response.json()["detail"]
+    assert isinstance(detail, str)
+    assert needle in detail
+
+    settings = get_settings()
+    assert list(settings.uploads_path.glob("*.mp4")) == []
+    assert list(settings.uploads_path.glob("*/job.json")) == []
+
+
 def test_upload_keeps_processing_when_pipeline_missing(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:

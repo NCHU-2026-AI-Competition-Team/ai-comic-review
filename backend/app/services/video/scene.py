@@ -122,11 +122,21 @@ def _extract_single_frame(ffmpeg: str, video_path: Path, timestamp_ms: int, dest
         raise RuntimeError(f"ffmpeg 未产出帧图片 timestamp_ms={timestamp_ms}: {dest}")
 
 
-def extract_scene_frames(video_id: str, video_path: Path) -> FramesInfo:
-    """按镜头切换检测抽帧到 storage/frames/{video_id}/，并写入 frames.json。"""
+def extract_scene_frames(
+    video_id: str,
+    video_path: Path,
+    threshold: Optional[float] = None,
+    max_frames: Optional[int] = None,
+) -> FramesInfo:
+    """按镜头切换检测抽帧到 storage/frames/{video_id}/，并写入 frames.json。
+
+    threshold / max_frames 未传入时回退全局 SCENE_THRESHOLD / SCENE_MAX_FRAMES。
+    """
     settings = get_settings()
-    threshold = settings.scene_threshold
-    max_frames = settings.scene_max_frames
+    if threshold is None:
+        threshold = settings.scene_threshold
+    if max_frames is None:
+        max_frames = settings.scene_max_frames
 
     # 检测阶段即施加帧数上限（起始帧占 1 个名额），防止高切换频率视频撑爆内存
     boundaries = detect_scene_changes(video_path, threshold, max_boundaries=max_frames - 1)

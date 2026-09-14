@@ -9,6 +9,7 @@ from app.schemas.video import (
     FrameInfo,
     FramesInfo,
     SamplingInfo,
+    VideoJob,
     VideoMetadata,
     VideoUploadResponse,
 )
@@ -74,6 +75,30 @@ def test_sampling_info_valid_combinations() -> None:
     assert fixed.fps == 2.0 and fixed.threshold is None
     scene = SamplingInfo(method="scene_change", threshold=0.4)
     assert scene.threshold == 0.4 and scene.fps is None
+
+
+def test_video_job_sampling_overrides_default_none() -> None:
+    job = VideoJob(video_id="vid-1", filename="demo.mp4")
+    assert job.frame_fps is None
+    assert job.scene_threshold is None
+    assert job.scene_max_frames is None
+    data = job.model_dump(mode="json")
+    assert data["frame_fps"] is None
+    assert data["scene_threshold"] is None
+    assert data["scene_max_frames"] is None
+
+
+def test_video_job_sampling_overrides_roundtrip() -> None:
+    job = VideoJob(
+        video_id="vid-2",
+        filename="demo.mp4",
+        sampling="scene",
+        scene_threshold=0.25,
+        scene_max_frames=12,
+    )
+    assert job.scene_threshold == pytest.approx(0.25)
+    assert job.scene_max_frames == 12
+    assert job.frame_fps is None
 
 
 def test_video_upload_response_invalid_status() -> None:
