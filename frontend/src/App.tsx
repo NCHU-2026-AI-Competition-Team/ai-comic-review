@@ -176,7 +176,7 @@ export default function App() {
   )
 
   const handleSubmit = useCallback(
-    async (file: File, sampling: SamplingMode) => {
+    async (file: File, options: { sampling: SamplingMode; frame_fps?: number; scene_threshold?: number; scene_max_frames?: number }) => {
       cancelRef.current?.() // 取消旧视频的轮询
       activeVideoIdRef.current = null
       setPhase('uploading')
@@ -187,7 +187,7 @@ export default function App() {
       setVideoDurationSec(null)
       setWorkflowStatus({ state: 'idle', stage: null, message: '', retry: false })
       try {
-        const upload = await uploadVideo(file, sampling)
+        const upload = await uploadVideo(file, options)
         const initial = toJob(upload)
         activeVideoIdRef.current = initial.video_id
         setJob(initial)
@@ -286,6 +286,7 @@ export default function App() {
                 metadata={job.metadata}
                 sampling={framesInfo?.sampling ?? job.frames?.sampling ?? null}
                 frameCount={framesInfo?.count ?? job.frames?.count ?? null}
+                job={job}
               />
             </div>
 

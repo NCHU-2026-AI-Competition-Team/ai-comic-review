@@ -36,6 +36,9 @@ export interface VideoJob {
   filename: string
   status: VideoStatus
   sampling: SamplingMode
+  frame_fps?: number
+  scene_threshold?: number
+  scene_max_frames?: number
   error: string | null
   metadata: VideoMetadata | null
   frames: FramesInfo | null

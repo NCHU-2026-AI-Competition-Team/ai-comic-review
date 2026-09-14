@@ -1,17 +1,19 @@
-import type { SamplingInfo, VideoMetadata } from '../types'
+import type { SamplingInfo, VideoMetadata, VideoJob } from '../types'
 
 interface Props {
   filename: string
   metadata: VideoMetadata | null
   sampling: SamplingInfo | null
   frameCount: number | null
+  job?: VideoJob | null
 }
 
-function formatSampling(sampling: SamplingInfo): string {
+function formatSampling(sampling: SamplingInfo, job?: VideoJob | null): string {
   if (sampling.method === 'scene_change') {
-    return `镜头切换检测（阈值 ${sampling.threshold}）`
+    const maxFrames = job?.scene_max_frames ? `，最大帧数 ${job.scene_max_frames}` : ''
+    return `镜头切换检测（生效阈值 ${sampling.threshold}${maxFrames}）`
   }
-  return `固定帧率（${sampling.fps} FPS）`
+  return `固定帧率（生效帧率 ${sampling.fps} FPS）`
 }
 
 function formatDuration(seconds: number): string {
@@ -24,7 +26,7 @@ function formatDuration(seconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
-export default function VideoInfoPanel({ filename, metadata, sampling, frameCount }: Props) {
+export default function VideoInfoPanel({ filename, metadata, sampling, frameCount, job }: Props) {
   const items: Array<{ label: string; value: string }> = [{ label: '文件名', value: filename }]
 
   if (metadata) {
@@ -35,7 +37,7 @@ export default function VideoInfoPanel({ filename, metadata, sampling, frameCoun
     if (metadata.fps !== null) items.push({ label: '帧率', value: `${metadata.fps} FPS` })
     if (metadata.codec !== null) items.push({ label: '编码格式', value: metadata.codec })
   }
-  if (sampling) items.push({ label: '采样方式', value: formatSampling(sampling) })
+  if (sampling) items.push({ label: '采样方式', value: formatSampling(sampling, job) })
   if (frameCount !== null) items.push({ label: '抽取帧数', value: String(frameCount) })
 
   return (

@@ -34,10 +34,28 @@ async function parseError(res: Response): Promise<ApiError> {
   return new ApiError(res.status, detail)
 }
 
-export async function uploadVideo(file: File, sampling: SamplingMode = 'fixed_fps'): Promise<VideoUploadResponse> {
+export async function uploadVideo(
+  file: File,
+  options: {
+    sampling?: SamplingMode
+    frame_fps?: number
+    scene_threshold?: number
+    scene_max_frames?: number
+  } = {}
+): Promise<VideoUploadResponse> {
   const form = new FormData()
   form.append('file', file, file.name)
-  form.append('sampling', sampling)
+  form.append('sampling', options.sampling || 'fixed_fps')
+  
+  if (options.frame_fps !== undefined) {
+    form.append('frame_fps', options.frame_fps.toString())
+  }
+  if (options.scene_threshold !== undefined) {
+    form.append('scene_threshold', options.scene_threshold.toString())
+  }
+  if (options.scene_max_frames !== undefined) {
+    form.append('scene_max_frames', options.scene_max_frames.toString())
+  }
 
   const res = await fetch(`${BASE_URL}/api/videos`, {
     method: 'POST',
