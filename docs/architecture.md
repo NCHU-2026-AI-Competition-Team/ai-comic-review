@@ -8,43 +8,49 @@ flowchart LR
         UP[UploadPanel 上传面板]
         VP[VideoInfoPanel 信息面板]
         FG[FramesGrid 帧网格]
+        OP[OcrPanel / AsrPanel 结果面板]
         API[api/videos.ts 封装 fetch]
     end
 
     subgraph 后端[后端 FastAPI :8000]
         ROUTE[api 路由层<br/>health.py / videos.py]
-        SVC[services 业务层<br/>video/ 包 / ocr_pipeline.py / registry.py]
+        SVC[services 业务层<br/>video/ 包 / audio.py<br/>ocr_pipeline.py / asr_pipeline.py / registry.py]
         SCHEMA[schemas 数据模型<br/>video.py / events.py]
         CFG[core/config.py 配置]
     end
 
     subgraph AI[ai/ 多模态能力]
         OCRP[ocr/base.py Provider 抽象<br/>ocr/paddleocr.py PP-OCRv6 实现]
+        ASRP[asr/base.py Provider 抽象<br/>asr/qwen_asr.py 云端 ASR 客户端]
     end
 
-    subgraph 外部工具
+    subgraph 外部服务
         FFP[ffprobe]
         FFM[ffmpeg]
+        MODAL[Modal 云端 ASR 服务<br/>Qwen3-ASR-1.7B]
     end
 
     subgraph 磁盘[storage/]
         UPL[uploads/<br/>原始视频 + job.json]
         FRM[frames/<video_id>/<br/>帧图片 + frames.json]
-        OUT[outputs/<video_id>/<br/>ocr.json 事件产出]
+        AUD[audio/<video_id>/<br/>audio.wav 16kHz 单声道]
+        OUT[outputs/<video_id>/<br/>ocr.json / asr.json 事件产出]
     end
 
     UP --> API --> ROUTE
     ROUTE --> SVC
     SVC --> AI
+    ASRP -->|HTTPS multipart| MODAL
     SVC --> FFP
     SVC --> FFM
     SVC --> UPL
     SVC --> FRM
+    SVC --> AUD
     SVC --> OUT
     ROUTE --> SCHEMA
     ROUTE --> CFG
     API -->|GET 状态/帧清单/帧图片| ROUTE
-    API -->|POST OCR / GET 事件| ROUTE
+    API -->|POST OCR/ASR / GET 事件| ROUTE
     FG -->|img src| ROUTE
 ```
 
@@ -57,25 +63,32 @@ backend/app/
 ├── main.py            # 应用入口：创建 app、注册 CORS 与路由、启动时确保存储目录存在
 ├── api/               # 路由层：HTTP 入参校验、状态码、响应组装
 │   ├── health.py      #   GET /api/health
-│   └── videos.py      #   视频上传与结果查询、OCR 触发与事件查询（/api/videos ...）
+│   └── videos.py      #   视频上传与结果查询、OCR/ASR 触发与事件查询（/api/videos ...）
 ├── services/          # 业务层：不感知 HTTP
 │   ├── video/         #   视频处理包：__init__.py（ffprobe 元数据、固定帧率抽帧、frames.json 落盘、流程编排）
 │   │   └── scene.py   #   镜头切换检测（scene_change 采样模式）
+│   ├── audio.py       #   音频提取：ffprobe 音轨探测 + ffmpeg 提取 16kHz 单声道 PCM wav
 │   ├── ocr_pipeline.py#   OCR 编排：读 frames.json → 逐帧识别 → TimelineEvent → ocr.json
+│   ├── asr_pipeline.py#   ASR 编排：确保 audio.wav → 云端识别 → TimelineEvent → asr.json
 │   └── registry.py    #   任务记录（VideoJob）的文件注册表，接口与存储解耦，后续可替换为 PostgreSQL
 ├── schemas/           # 数据模型（Pydantic）
 │   ├── video.py       #   VideoJob / VideoMetadata / FramesInfo / FrameInfo / SamplingInfo / VideoUploadResponse
-│   └── events.py      #   TimelineEvent 统一时间线事件 / ModalityRunResponse（OCR 已落地，ASR/视觉/VLM 预留）
+│   └── events.py      #   TimelineEvent 统一时间线事件 / ModalityRunResponse（OCR/ASR 已落地，视觉/VLM 预留）
 └── core/
     └── config.py      # Settings（pydantic-settings），lru_cache 单例 get_settings()
 
 ai/                    # 多模态能力包（仓库根，经 sys.path/pythonpath 可被 backend 与 pytest 导入）
-└── ocr/
-    ├── base.py        #   OcrProvider 抽象基类 + OcrTextLine，业务层只依赖此接口
-    └── paddleocr.py   #   PaddleOcrProvider：PP-OCRv6 实现，惰性单例，模型/语言/设备走配置
+├── ocr/
+│   ├── base.py        #   OcrProvider 抽象基类 + OcrTextLine，业务层只依赖此接口
+│   ├── paddleocr.py   #   PaddleOcrProvider：PP-OCRv6 实现，惰性单例，模型/语言/设备走配置
+│   └── factory.py     #   默认 Provider 入口（按配置分派，业务层不 import 具体实现）
+└── asr/
+    ├── base.py        #   AsrProvider 抽象基类 + AsrSegment/AsrResult，业务层只依赖此接口
+    ├── qwen_asr.py    #   QwenAsrProvider：Modal 云端 Qwen3-ASR 的 HTTPS 客户端（httpx），端点/模型/超时走配置
+    └── factory.py     #   默认 Provider 入口（按配置分派，业务层不 import 具体实现）
 ```
 
-分层依赖方向：`api` → `services` → `ai` / `schemas` / `core`。路由层只做校验与编排；`services/video` 包通过 `subprocess.run` 以参数列表形式调用 ffprobe/ffmpeg（无 shell）；`services/registry.py` 将任务记录以 `job.json` 落盘，对上层屏蔽存储细节；`services/ocr_pipeline.py` 只依赖 `ai.ocr.base` 的 Provider 抽象，不感知具体 OCR 引擎。
+分层依赖方向：`api` → `services` → `ai` / `schemas` / `core`。路由层只做校验与编排；`services/video` 包与 `services/audio.py` 通过 `subprocess.run` 以参数列表形式调用 ffprobe/ffmpeg（无 shell）；`services/registry.py` 将任务记录以 `job.json` 落盘，对上层屏蔽存储细节；`services/ocr_pipeline.py` / `services/asr_pipeline.py` 只依赖 `ai.ocr.base` / `ai.asr.base` 的 Provider 抽象与工厂入口，不感知具体引擎（有防回归测试约束）。
 
 ## 视频上传与抽帧流程
 
@@ -135,12 +148,48 @@ GET /api/videos/{video_id}/events?modality=ocr
 
 OCR 引擎依赖（paddleocr/paddlepaddle）只在 `ai/ocr/paddleocr.py` 内延迟导入，未安装 OCR 环境时后端其余功能与测试照常运行。Windows 环境下 paddle 与 torch 共存时必须先导入 torch（否则 torch 的 shm.dll 解析失败拖垮 modelscope → paddlex → paddleocr 导入链），该约束已在 `ai/ocr/paddleocr.py` 内处理并注释。
 
+## ASR 分支：Video → Audio → 云端 ASR → TimelineEvent(asr)
+
+拓扑约束：ASR 推理全部在 Modal 云端（Qwen3-ASR-1.7B），本地只跑业务管线——提取音频并经 HTTPS 调用，不加载任何 ASR 模型权重。
+
+```
+POST /api/videos/{video_id}/asr
+  │
+  ├─ 1. video_id 校验；任务记录不存在 404
+  ├─ 2. services/asr_pipeline.run_asr 同步执行（本阶段不引入任务队列）：
+  │      a. services/audio.ensure_audio：audio.wav 已存在则复用，
+  │         否则自动提取——ffprobe 探测音轨（无音轨返回 409 提示无法识别，
+  │         上传文件缺失返回 409 提示重新上传），
+  │         ffmpeg -vn -ac 1 -ar 16000 -f wav 提取单声道 16kHz PCM
+  │         到 storage/audio/{video_id}/audio.wav
+  │      b. 调用 ai.asr 的 AsrProvider.transcribe（惰性单例）：
+  │         QwenAsrProvider 以 multipart 上传 wav 到
+  │         POST {MODAL_ASR_URL}/transcribe（表单字段 model 携带模型标识），
+  │         响应 {"segments": [{text,start_ms,end_ms,confidence}], language}
+  │         经严格解析（缺字段/类型非法/时间区间非法均明确抛错）；
+  │         超时、网络错误与非 200 响应抛 AsrServiceError
+  │      c. 每个分段聚合为 TimelineEvent：modality='asr'，
+  │         start_ms/end_ms 取分段区间（与全模态统一 int 毫秒时间轴一致），
+  │         content 为分段文本，confidence 截断到 [0, 1]，
+  │         语言与分段序号保留在 metadata；
+  │         空文本分段不产事件
+  │      d. 结果落盘 storage/outputs/{video_id}/asr.json
+  │         （{video_id, modality, events: [...]}）
+  └─ 3. 返回 {video_id, modality: 'asr', event_count}
+
+GET /api/videos/{video_id}/events?modality=asr
+  └─ 复用通用事件端点，读取 outputs/{video_id}/asr.json（无需改动）
+```
+
+音频提取的采样率与声道数由 ASR 服务契约固定（16kHz 单声道 PCM wav），不走配置；云端端点、模型名与请求超时走配置（`modal_asr_url` / `asr_primary_model` / `asr_request_timeout_seconds`），未配置 `MODAL_ASR_URL` 时 Provider 初始化明确报错。时间戳对齐模型（Qwen3-ForcedAligner-0.6B）由云端服务内部使用，本地仅以 `asr_aligner_model` 记录标识。
+
 ## 模型选型与 Provider 抽象
 
 多模态能力的统一约定：每个模态在 `ai/{modality}/base.py` 定义 Provider 抽象（输入输出契约），具体引擎以同接口实现并惰性加载，模型标识全部走 `core/config.py` 配置（禁止散落在业务代码）；业务编排只依赖 base 抽象，更换引擎不影响编排与路由。
 
 - OCR：主模型 PP-OCRv6（`ai/ocr/paddleocr.py` 的 PaddleOcrProvider，PaddleOCR 官方包，默认 CPU）；备用疑难模型 PaddleOCR-VL 仅由配置记录标识（`ocr_fallback_model`），后续切片以同接口接入，当前不落任何占位实现。模型名、语言、设备见配置项表的 `ocr_*` 项。
-- ASR / 视觉 / VLM / 风险融合：尚未实现，接入时遵循同一 Provider 约定（base 抽象 + 配置驱动 + 惰性加载），产出统一归一到 TimelineEvent。
+- ASR：主模型 Qwen3-ASR-1.7B，部署在 Modal 云端（`ai/asr/qwen_asr.py` 的 QwenAsrProvider 为 HTTPS 客户端，本地不加载模型权重）；时间戳对齐模型 Qwen3-ForcedAligner-0.6B 由云端服务内部使用，本地仅以 `asr_aligner_model` 记录标识。端点、模型名、超时见配置项表的 `modal_asr_url` / `asr_*` 项。
+- 视觉 / VLM / 风险融合：尚未实现，接入时遵循同一 Provider 约定（base 抽象 + 配置驱动 + 惰性加载），产出统一归一到 TimelineEvent。
 
 ## 前端页面与 API 交互
 
@@ -149,7 +198,7 @@ OCR 引擎依赖（paddleocr/paddlepaddle）只在 `ai/ocr/paddleocr.py` 内延�
 1. `UploadPanel`：拖拽或点选单个视频并选择采样模式（固定帧率 2FPS / 镜头切换检测），前端先做扩展名预校验，提交时 `uploadVideo()` 携带 sampling 字段发起 `POST /api/videos`。
 2. 上传响应若直接是 `processed` 则展示结果；若为 `processing` 则每 2 秒轮询 `GET /api/videos/{video_id}`，直到 `processed` / `failed`。
 3. 成功后调用 `GET .../frames` 拉取帧清单（仅 404 未生成时退回任务记录中携带的帧信息，500/网络异常等错误直接向用户展示），`VideoInfoPanel` 展示元数据，`FramesGrid` 以帧图片 URL（`GET .../frames/{filename}`）渲染帧网格。
-4. 结果区的 `OcrPanel` 提供「运行 OCR」按钮：触发 `POST .../ocr` 后拉取 `GET .../events?modality=ocr`，以时间戳 + 文本 + 置信度列表展示 ocr 模态事件。
+4. 结果区的 `OcrPanel` / `AsrPanel` 分别提供「运行 OCR」「运行 ASR」按钮：触发 `POST .../ocr` / `POST .../asr` 后拉取 `GET .../events?modality=ocr|asr`，OCR 以时间戳 + 文本 + 置信度、ASR 以时间段（起止时间戳）+ 文本 + 置信度列表展示事件；ASR 的 409（无音轨/原始文件缺失）直接展示后端返回的提示。
 5. `failed / error` 状态展示错误信息并允许返回重新上传。
 
 ## 存储布局
@@ -165,17 +214,20 @@ storage/
 │   └── {video_id}/
 │       ├── frame_000000.jpg ...  # 抽帧图片
 │       └── frames.json           # 帧清单（FramesInfo）
+├── audio/
+│   └── {video_id}/
+│       └── audio.wav             # ASR 用音频（16kHz 单声道 PCM，首次 ASR 时自动提取）
 └── outputs/                      # 审核产出
     └── {video_id}/
-        └── ocr.json              # OCR 事件产出（{video_id, modality, events}）
+        ├── ocr.json              # OCR 事件产出（{video_id, modality, events}）
+        └── asr.json              # ASR 事件产出（同结构）
 ```
 
 ## AI 模块现状
 
-`ai/` 下五个模块中，`ai/ocr` 已实现（PP-OCRv6 Provider，见上文「模型选型与 Provider 抽象」）；`ai/asr`、`ai/video`、`ai/vlm`、`ai/risk` 仍只有 README 占位：
+`ai/` 下五个模块中，`ai/ocr` 与 `ai/asr` 已实现（见上文「模型选型与 Provider 抽象」）；`ai/video`、`ai/vlm`、`ai/risk` 仍只有 README 占位：
 
 - `ai/video`：视频元数据解析与抽帧（当前该能力由后端 `app/services/video` 包承担）
-- `ai/asr`：语音转写
 - `ai/vlm`：视觉语言大模型理解
 - `ai/risk`：多模态风险融合判定
 
@@ -199,5 +251,9 @@ storage/
 | `ocr_fallback_model` | `OCR_FALLBACK_MODEL` | `PaddleOCR-VL-1.6` | 备用疑难 OCR 模型标识，仅记录不加载 |
 | `ocr_lang` | `OCR_LANG` | `ch` | OCR 识别语言 |
 | `ocr_use_gpu` | `OCR_USE_GPU` | `false` | OCR 是否使用 GPU，默认 CPU |
+| `modal_asr_url` | `MODAL_ASR_URL` | 空 | Modal 云端 ASR 服务地址（不含路径），未配置时 ASR 不可用 |
+| `asr_primary_model` | `ASR_PRIMARY_MODEL` | `Qwen3-ASR-1.7B` | 主 ASR 模型标识 |
+| `asr_aligner_model` | `ASR_ALIGNER_MODEL` | `Qwen3-ForcedAligner-0.6B` | 时间戳对齐模型标识，仅记录不加载，云端服务内部使用 |
+| `asr_request_timeout_seconds` | `ASR_REQUEST_TIMEOUT_SECONDS` | `120` | 云端 ASR 服务请求超时（秒），必须大于 0 |
 
 其他相关配置：CORS 允许来源在 `main.py` 中固定为 `http://localhost:5173` / `http://127.0.0.1:5173`（Vite 开发服务器）；前端 API 地址为 `VITE_API_BASE_URL`（默认空串，走 Vite proxy）。
