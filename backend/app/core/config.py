@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     scene_threshold: float = Field(default=0.4, gt=0, lt=1, description="镜头切换检测的场景分数阈值，必须在 (0, 1) 区间")
     scene_max_frames: int = Field(default=500, gt=0, description="镜头切换检测的最大抽帧数，超出部分截断，防止异常视频产生海量帧")
     max_upload_size_mb: int = 500
+    # OCR 模型配置（ai/ocr 使用，模型标识不散落在业务代码）
+    ocr_primary_model: str = Field(default="PP-OCRv6", description="主 OCR 模型（PaddleOCR ocr_version）")
+    ocr_fallback_model: str = Field(default="PaddleOCR-VL-1.6", description="备用疑难 OCR 模型标识，仅记录不加载，后续切片接入")
+    ocr_lang: str = Field(default="ch", description="OCR 识别语言")
+    ocr_use_gpu: bool = Field(default=False, description="OCR 是否使用 GPU，默认 CPU")
 
     @property
     def storage_path(self) -> Path:

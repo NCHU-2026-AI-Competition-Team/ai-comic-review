@@ -5,3 +5,9 @@ pydantic-settings
 python-multipart
 pytest
 httpx
+# OCR 引擎：PaddleOCR 官方包（主模型 PP-OCRv6），CPU 版 paddlepaddle；
+# 模型权重首次运行自动下载到用户缓存目录（~/.paddlex），不进入仓库
+paddleocr
+paddlepaddle
+# 测试用图片生成（引擎集成测试以 Pillow 绘制带文字的测试图）
+pillow
