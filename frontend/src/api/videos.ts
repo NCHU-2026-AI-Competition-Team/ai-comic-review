@@ -75,7 +75,18 @@ export async function runOcr(videoId: string): Promise<ModalityRunResponse> {
   return (await res.json()) as ModalityRunResponse
 }
 
-/** 读取已生成的模态事件列表（当前仅 ocr）。 */
+/** 对视频同步执行 ASR（自动提取音频），返回产出的事件数量。 */
+export async function runAsr(videoId: string): Promise<ModalityRunResponse> {
+  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/asr`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+  return (await res.json()) as ModalityRunResponse
+}
+
+/** 读取已生成的模态事件列表（ocr / asr）。 */
 export async function getEvents(videoId: string, modality: EventModality = 'ocr'): Promise<TimelineEvent[]> {
   const res = await fetch(
     `${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/events?modality=${encodeURIComponent(modality)}`,

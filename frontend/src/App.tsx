@@ -3,6 +3,7 @@ import UploadPanel from './components/UploadPanel'
 import VideoInfoPanel from './components/VideoInfoPanel'
 import FramesGrid from './components/FramesGrid'
 import OcrPanel from './components/OcrPanel'
+import AsrPanel from './components/AsrPanel'
 import { ApiError, getFrames, getVideo, uploadVideo } from './api/videos'
 import type { FramesInfo, SamplingMode, VideoJob, VideoUploadResponse } from './types'
 
@@ -170,6 +171,7 @@ export default function App() {
             />
             {framesInfo && <FramesGrid videoId={job.video_id} framesInfo={framesInfo} />}
             <OcrPanel videoId={job.video_id} />
+            <AsrPanel videoId={job.video_id} />
             <button className="primary" type="button" onClick={handleReset}>
               处理新视频
             </button>
