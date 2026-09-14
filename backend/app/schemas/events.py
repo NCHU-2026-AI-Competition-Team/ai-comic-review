@@ -16,3 +16,15 @@ class TimelineEvent(BaseModel):
     content: str = Field(description="事件内容（文本或描述）")
     confidence: float = Field(ge=0.0, le=1.0, description="置信度")
     metadata: dict[str, Any] = Field(default_factory=dict, description="模态特定的附加信息")
+
+
+# 事件来源模态：与 TimelineEvent.modality 取值一致
+EventModality = Literal["ocr", "asr", "vision", "vlm"]
+
+
+class ModalityRunResponse(BaseModel):
+    """单模态分析（如 OCR）执行接口的响应模型。"""
+
+    video_id: str
+    modality: EventModality
+    event_count: int = Field(ge=0, description="本次产出的事件数量")

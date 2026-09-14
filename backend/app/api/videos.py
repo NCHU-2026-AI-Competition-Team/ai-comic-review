@@ -5,12 +5,13 @@ import logging
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
+from app.schemas.events import EventModality, ModalityRunResponse, TimelineEvent
 from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
-from app.services import registry
+from app.services import ocr_pipeline, registry
 
 logger = logging.getLogger(__name__)
 
@@ -150,3 +151,40 @@ def get_frame_image(video_id: str, filename: str) -> FileResponse:
     if not frame_file.is_file():
         raise HTTPException(status_code=404, detail="帧图片不存在")
     return FileResponse(frame_file)
+
+
+@router.post("/{video_id}/ocr", response_model=ModalityRunResponse)
+def run_video_ocr(video_id: str) -> ModalityRunResponse:
+    """对已完成抽帧的视频同步执行 OCR，产出 ocr 模态时间线事件。"""
+    _validate_video_id(video_id)
+    try:
+        job = registry.get_job(video_id)
+    except registry.JobCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="任务记录文件损坏") from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    try:
+        events = ocr_pipeline.run_ocr(video_id)
+    except ocr_pipeline.FramesNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="尚未完成抽帧，请先完成视频处理") from exc
+    except ocr_pipeline.FramesCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="帧清单文件损坏") from exc
+    return ModalityRunResponse(video_id=video_id, modality="ocr", event_count=len(events))
+
+
+@router.get("/{video_id}/events", response_model=list[TimelineEvent])
+def get_video_events(
+    video_id: str,
+    modality: EventModality = Query("ocr", description="事件来源模态"),
+) -> list[TimelineEvent]:
+    """读取已生成的模态事件列表，尚未生成时返回 404。"""
+    _validate_video_id(video_id)
+    events_file = get_settings().outputs_path / video_id / f"{modality}.json"
+    if not events_file.is_file():
+        raise HTTPException(status_code=404, detail="事件尚未生成")
+    try:
+        data = json.loads(events_file.read_text(encoding="utf-8"))
+        return [TimelineEvent.model_validate(event) for event in data.get("events", [])]
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.error("事件文件损坏 video_id=%s modality=%s: %s", video_id, modality, exc)
+        raise HTTPException(status_code=500, detail="事件文件损坏") from exc
