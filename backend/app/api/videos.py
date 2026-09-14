@@ -9,7 +9,12 @@ from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
 from app.core.config import get_settings
-from app.schemas.events import EventModality, ModalityRunResponse, TimelineEvent
+from app.schemas.events import (
+    EventModality,
+    ModalityEventsFile,
+    ModalityRunResponse,
+    TimelineEvent,
+)
 from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
 from app.services import ocr_pipeline, registry
 
@@ -184,7 +189,13 @@ def get_video_events(
         raise HTTPException(status_code=404, detail="事件尚未生成")
     try:
         data = json.loads(events_file.read_text(encoding="utf-8"))
-        return [TimelineEvent.model_validate(event) for event in data.get("events", [])]
+        events_payload = ModalityEventsFile.model_validate(data)
+        if events_payload.video_id != video_id or events_payload.modality != modality:
+            raise ValueError(
+                f"事件文件与请求不一致：文件 video_id={events_payload.video_id} "
+                f"modality={events_payload.modality}"
+            )
     except (json.JSONDecodeError, ValueError) as exc:
         logger.error("事件文件损坏 video_id=%s modality=%s: %s", video_id, modality, exc)
         raise HTTPException(status_code=500, detail="事件文件损坏") from exc
+    return events_payload.events

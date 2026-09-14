@@ -101,7 +101,7 @@ def test_run_ocr_and_get_events_roundtrip(
     """假 frames.json + 桩引擎：POST /ocr 生成事件，GET /events 查询闭环。"""
     _save_job()
     _write_frames_json()
-    monkeypatch.setattr(ocr_pipeline, "get_provider", lambda: FakeProvider())
+    monkeypatch.setattr(ocr_pipeline, "get_default_provider", lambda: FakeProvider())
 
     response = client.post(f"/api/videos/{VALID_VIDEO_ID}/ocr")
     assert response.status_code == 200, response.text
@@ -143,3 +143,60 @@ def test_get_events_invalid_modality(client: TestClient) -> None:
     """modality 超出枚举取值时由 FastAPI 校验返回 422。"""
     response = client.get(f"/api/videos/{VALID_VIDEO_ID}/events?modality=text")
     assert response.status_code == 422
+
+
+def _write_events_payload(payload: object, video_id: str = VALID_VIDEO_ID) -> None:
+    out_dir = get_settings().outputs_path / video_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "ocr.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def _valid_event(video_id: str = VALID_VIDEO_ID) -> dict:
+    return {
+        "id": "ocr-frame_000000",
+        "video_id": video_id,
+        "modality": "ocr",
+        "start_ms": 0,
+        "end_ms": 0,
+        "content": "台词",
+        "confidence": 0.9,
+        "metadata": {},
+    }
+
+
+def test_get_events_missing_top_level_fields(client: TestClient) -> None:
+    """事件文件缺少顶层字段（video_id/modality）时返回 500 并提示文件损坏。"""
+    _write_events_payload({"events": [_valid_event()]})
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/events?modality=ocr")
+    assert response.status_code == 500
+    assert "事件文件损坏" in response.json()["detail"]
+
+
+def test_get_events_video_id_mismatch(client: TestClient) -> None:
+    """事件文件 video_id 与请求不一致时返回 500 并提示文件损坏。"""
+    _write_events_payload(
+        {
+            "video_id": "00000000-0000-0000-0000-000000000000",
+            "modality": "ocr",
+            "events": [_valid_event("00000000-0000-0000-0000-000000000000")],
+        }
+    )
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/events?modality=ocr")
+    assert response.status_code == 500
+    assert "事件文件损坏" in response.json()["detail"]
+
+
+def test_get_events_modality_mismatch(client: TestClient) -> None:
+    """事件文件 modality 与请求不一致时返回 500 并提示文件损坏。"""
+    _write_events_payload(
+        {
+            "video_id": VALID_VIDEO_ID,
+            "modality": "asr",
+            "events": [{**_valid_event(), "modality": "asr"}],
+        }
+    )
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/events?modality=ocr")
+    assert response.status_code == 500
+    assert "事件文件损坏" in response.json()["detail"]

@@ -51,6 +51,7 @@ export interface VideoUploadResponse {
   frames: FramesInfo | null
 }
 
+// 事件来源模态：与后端 backend/app/schemas/events.py 的 EventModality 保持一致（手工同步，不引入代码生成）
 export type EventModality = 'ocr' | 'asr' | 'vision' | 'vlm'
 
 export interface TimelineEvent {
