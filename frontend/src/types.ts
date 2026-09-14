@@ -50,3 +50,22 @@ export interface VideoUploadResponse {
   metadata: VideoMetadata | null
   frames: FramesInfo | null
 }
+
+export type EventModality = 'ocr' | 'asr' | 'vision' | 'vlm'
+
+export interface TimelineEvent {
+  id: string
+  video_id: string
+  modality: EventModality
+  start_ms: number
+  end_ms: number
+  content: string
+  confidence: number
+  metadata: Record<string, unknown>
+}
+
+export interface ModalityRunResponse {
+  video_id: string
+  modality: EventModality
+  event_count: number
+}

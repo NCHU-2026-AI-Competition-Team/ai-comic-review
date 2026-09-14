@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import UploadPanel from './components/UploadPanel'
 import VideoInfoPanel from './components/VideoInfoPanel'
 import FramesGrid from './components/FramesGrid'
+import OcrPanel from './components/OcrPanel'
 import { ApiError, getFrames, getVideo, uploadVideo } from './api/videos'
 import type { FramesInfo, SamplingMode, VideoJob, VideoUploadResponse } from './types'
 
@@ -168,6 +169,7 @@ export default function App() {
               frameCount={framesInfo?.count ?? job.frames?.count ?? null}
             />
             {framesInfo && <FramesGrid videoId={job.video_id} framesInfo={framesInfo} />}
+            <OcrPanel videoId={job.video_id} />
             <button className="primary" type="button" onClick={handleReset}>
               处理新视频
             </button>

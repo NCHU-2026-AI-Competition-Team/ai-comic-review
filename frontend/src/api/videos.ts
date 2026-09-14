@@ -1,4 +1,12 @@
-import type { FramesInfo, SamplingMode, VideoJob, VideoUploadResponse } from '../types'
+import type {
+  EventModality,
+  FramesInfo,
+  ModalityRunResponse,
+  SamplingMode,
+  TimelineEvent,
+  VideoJob,
+  VideoUploadResponse,
+} from '../types'
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
 
@@ -54,6 +62,28 @@ export async function getFrames(videoId: string): Promise<FramesInfo> {
     throw await parseError(res)
   }
   return (await res.json()) as FramesInfo
+}
+
+/** 对已完成抽帧的视频同步执行 OCR，返回产出的事件数量。 */
+export async function runOcr(videoId: string): Promise<ModalityRunResponse> {
+  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/ocr`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+  return (await res.json()) as ModalityRunResponse
+}
+
+/** 读取已生成的模态事件列表（当前仅 ocr）。 */
+export async function getEvents(videoId: string, modality: EventModality = 'ocr'): Promise<TimelineEvent[]> {
+  const res = await fetch(
+    `${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/events?modality=${encodeURIComponent(modality)}`,
+  )
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+  return (await res.json()) as TimelineEvent[]
 }
 
 /** 帧图片地址：frames.json 中的 path 即以 /api/videos/ 开头的可直接访问路径。 */
