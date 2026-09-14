@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { RiskReport, TimelineEvent } from '../types'
 import { formatTimestamp } from './FramesGrid'
 import { ApiError, getReport } from '../api/videos'
@@ -71,7 +71,13 @@ export default function RiskReportPanel({ videoId, vlmEvents }: Props) {
       <div className="risk-report-panel panel">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
           <h2 style={{ margin: 0 }}>风险报告</h2>
-          {needsEscalation && (
+          {overall?.escalation_status ? (
+            <span style={{ background: overall.escalation_status === 'pending_review' ? 'var(--error)' : 'var(--bg)', color: overall.escalation_status === 'pending_review' ? '#fff' : 'var(--text-dim)', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' }}>
+              {overall.escalation_status === 'pending_review' ? '待复审' : 
+               overall.escalation_status === 'not_needed' ? '无需复审' : 
+               '已复审'}
+            </span>
+          ) : needsEscalation && (
             <span style={{ background: 'var(--error)', color: '#fff', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 'bold' }}>
               待复审
             </span>
@@ -82,7 +88,7 @@ export default function RiskReportPanel({ videoId, vlmEvents }: Props) {
           <div className="risk-item" style={{ marginBottom: 16 }}>
             <div className="risk-header">
               <span className={`risk-severity severity-${normalizeSeverity(overall.severity)}`}>
-                {overall.risk || '总体风险'} ({normalizeSeverity(overall.severity).toUpperCase()})
+                {overall.risk ? '检出风险' : '未检出风险'} ({normalizeSeverity(overall.severity).toUpperCase()})
               </span>
               {typeof overall.confidence === 'number' && (
                 <span className="risk-time">置信度: {(overall.confidence * 100).toFixed(0)}%</span>
