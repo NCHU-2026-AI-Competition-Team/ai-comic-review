@@ -19,12 +19,22 @@ storage/audio/*
 *.mkv
 *.avi
 
-# 模型权重
+# 模型权重（禁止入库）
 models/
 checkpoints/
 *.safetensors
 *.ckpt
 *.pth
+*.bin
+*.onnx
+*.pt
+
+# Modal 本地冒烟产物与密钥（禁止入库）
+modal/*.wav
+modal/tmp/
+modal/.env
+**/.hf_token
+huggingface-secret*
 
 # Python
 __pycache__/
