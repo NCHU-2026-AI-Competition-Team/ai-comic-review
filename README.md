@@ -15,7 +15,7 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 ## 技术栈
 
 - 后端：Python 3.11、FastAPI、Uvicorn、Pydantic / pydantic-settings、FFmpeg（ffmpeg / ffprobe 命令行）
-- AI：PaddleOCR（主 OCR 模型 PP-OCRv6，CPU 版 paddlepaddle；模型权重首次运行自动下载到用户缓存目录，不进入仓库）
+- AI：PaddleOCR（主 OCR 模型 PP-OCRv6，CPU 版 paddlepaddle；模型权重首次运行自动下载到用户缓存目录，不进入仓库）+ torch（OCR 链路显式依赖，Windows 下须先于 paddle 加载）
 - 前端：React 18、TypeScript、Vite 5
 - 测试：pytest、FastAPI TestClient（httpx）
 - 部署：docker-compose（后端服务）
@@ -25,7 +25,7 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 ```
 ├── ai/                     # AI 模块（多模态能力，Provider 抽象 + 配置驱动）
 │   ├── asr/                #   语音转写（占位）
-│   ├── ocr/                #   画面文字识别：base.py Provider 抽象 + paddleocr.py PP-OCRv6 实现
+│   ├── ocr/                #   画面文字识别：base.py Provider 抽象 + paddleocr.py PP-OCRv6 实现 + factory.py 默认 Provider 入口
 │   ├── risk/               #   多模态风险融合判定（占位）
 │   ├── video/              #   视频元数据解析与抽帧（占位，当前由后端 services/video 承担）
 │   └── vlm/                #   视觉语言大模型理解（占位）
@@ -105,9 +105,13 @@ pip install -r backend/requirements.txt   # 已包含 pytest 与 httpx
 python -m pytest tests/ -v
 ```
 
-说明：测试通过 `STORAGE_DIR` 环境变量隔离到临时目录，不会污染仓库下的 `storage/`；涉及真实 ffmpeg/ffprobe 的用例在本机未安装 FFmpeg 时会自动跳过；OCR 引擎集成测试在 paddleocr 未安装时自动跳过（已安装时需联网下载模型权重，首次较慢）。
+说明：测试通过 `STORAGE_DIR` 环境变量隔离到临时目录，不会污染仓库下的 `storage/`；涉及真实 ffmpeg/ffprobe 的用例在本机未安装 FFmpeg 时会自动跳过；OCR 引擎集成测试在 paddleocr 或 torch 未安装时自动跳过（已安装时需联网下载模型权重，首次较慢）。
 
-OCR 说明：引擎为 PaddleOCR 官方包（`paddleocr` + CPU 版 `paddlepaddle`），主模型 PP-OCRv6 由配置 `OCR_PRIMARY_MODEL` 指定；模型权重首次运行自动下载到用户缓存目录（`~/.paddlex`），不会进入仓库。
+OCR 说明：引擎为 PaddleOCR 官方包（`paddleocr` + CPU 版 `paddlepaddle`），主模型 PP-OCRv6 由配置 `OCR_PRIMARY_MODEL` 指定；模型权重首次运行自动下载到用户缓存目录（`~/.paddlex`），不会进入仓库。`torch` 为 OCR 链路显式依赖：Windows 下必须先于 paddle 加载，否则 paddle 预装的冲突 DLL 会导致 torch 的 shm.dll 解析失败（WinError 127），拖垮整条导入链，详见 `backend/requirements.txt` 注释。
+
+## 已知问题与技术债
+
+- `POST /api/videos/{video_id}/ocr` 为同步执行：长视频逐帧识别会长时间占用 worker 连接与事件循环。后续切片将改为异步任务（提交后立即返回任务 ID，提供状态查询接口），当前阶段调用方需容忍较长响应时间。
 
 ## 配置项
 
