@@ -14,7 +14,7 @@ flowchart LR
 
     subgraph 后端[后端 FastAPI :8000]
         ROUTE[api 路由层<br/>health.py / videos.py]
-        SVC[services 业务层<br/>video/ 包 / audio.py<br/>ocr_pipeline.py / asr_pipeline.py / registry.py]
+        SVC[services 业务层<br/>video/ 包 / audio.py<br/>ocr_pipeline.py / asr_pipeline.py<br/>vlm_pipeline.py / registry.py]
         SCHEMA[schemas 数据模型<br/>video.py / events.py]
         CFG[core/config.py 配置]
     end
@@ -22,6 +22,7 @@ flowchart LR
     subgraph AI[ai/ 多模态能力]
         OCRP[ocr/base.py Provider 抽象<br/>ocr/paddleocr.py 本地 PP-OCRv6<br/>ocr/remote.py Modal HTTPS 客户端]
         ASRP[asr/base.py Provider 抽象<br/>asr/qwen_asr.py 云端 ASR 客户端]
+        VLMP[vlm/base.py Provider 抽象<br/>vlm/qwen.py 云端 VLM 客户端]
     end
 
     subgraph 外部服务
@@ -29,13 +30,14 @@ flowchart LR
         FFM[ffmpeg]
         MODAL[Modal 云端 ASR 服务<br/>Qwen3-ASR-1.7B]
         MODALOCR[Modal 云端 OCR 服务<br/>PP-OCRv6 + PaddleOCR-VL-1.6]
+        MODALVLM[Modal 云端 VLM 主审<br/>Qwen3-VL-8B-Instruct]
     end
 
     subgraph 磁盘[storage/]
         UPL[uploads/<br/>原始视频 + job.json]
         FRM[frames/<video_id>/<br/>帧图片 + frames.json]
         AUD[audio/<video_id>/<br/>audio.wav 16kHz 单声道]
-        OUT[outputs/<video_id>/<br/>ocr.json / asr.json 事件产出]
+        OUT[outputs/<video_id>/<br/>ocr.json / asr.json / vlm.json]
     end
 
     UP --> API --> ROUTE
@@ -43,6 +45,7 @@ flowchart LR
     SVC --> AI
     ASRP -->|HTTPS multipart| MODAL
     OCRP -->|HTTPS multipart| MODALOCR
+    VLMP -->|HTTPS multipart| MODALVLM
     SVC --> FFP
     SVC --> FFM
     SVC --> UPL
@@ -52,7 +55,7 @@ flowchart LR
     ROUTE --> SCHEMA
     ROUTE --> CFG
     API -->|GET 状态/帧清单/帧图片| ROUTE
-    API -->|POST OCR/ASR / GET 事件| ROUTE
+    API -->|POST OCR/ASR/review / GET 事件与报告| ROUTE
     FG -->|img src| ROUTE
 ```
 
@@ -72,11 +75,13 @@ backend/app/
 │   ├── audio.py       #   音频提取：ffprobe 音轨探测 + ffmpeg 提取 16kHz 单声道 PCM wav（临时文件+校验+原子替换）
 │   ├── ocr_pipeline.py#   OCR 编排：读 frames.json → 逐帧识别 → TimelineEvent → ocr.json
 │   ├── asr_pipeline.py#   ASR 编排：确保 audio.wav → 云端识别 → TimelineEvent → asr.json（默认幂等复用）
-│   ├── modality_store.py # 模态事件原子落盘与损坏恢复（OCR/ASR/后续 VLM 共用）
+│   ├── vlm_pipeline.py#   VLM 编排：读帧 + OCR/ASR → 云端主审 → TimelineEvent → vlm.json（默认幂等复用）
+│   ├── modality_store.py # 模态事件原子落盘与损坏恢复（OCR/ASR/VLM 共用）
 │   └── registry.py    #   任务记录（VideoJob）的文件注册表，接口与存储解耦，后续可替换为 PostgreSQL
 ├── schemas/           # 数据模型（Pydantic）
 │   ├── video.py       #   VideoJob / VideoMetadata / FramesInfo / FrameInfo / SamplingInfo / VideoUploadResponse
-│   └── events.py      #   TimelineEvent 统一时间线事件 / ModalityRunResponse（OCR/ASR 已落地，视觉/VLM 预留）
+│   ├── events.py      #   TimelineEvent 统一时间线事件 / ModalityRunResponse / ReviewRunResponse
+│   └── report.py      #   ReviewReport 结构化审核报告
 └── core/
     └── config.py      # Settings（pydantic-settings），lru_cache 单例 get_settings()
 
@@ -90,6 +95,12 @@ ai/                    # 多模态能力包（仓库根，经 sys.path/pythonpat
     ├── base.py        #   AsrProvider 抽象 + AsrSegment/AsrResult + 抽象异常（AsrProviderError 等）
     ├── qwen_asr.py    #   QwenAsrProvider：Modal 云端 Qwen3-ASR 的 HTTPS 客户端（httpx），只抛抽象异常
     └── factory.py     #   默认 Provider 入口（按配置分派，业务层不 import 具体实现）
+└── vlm/
+    ├── base.py        #   VlmProvider 抽象 + VlmReviewInput + 抽象异常
+    ├── schemas.py     #   VlmReviewResult 严格 JSON 响应模型与解析
+    ├── qwen.py        #   QwenVlmProvider：Modal 云端 Qwen3-VL HTTPS 客户端（httpx）
+    ├── factory.py     #   默认 Provider 入口（按 VLM_PROVIDER 分派）
+    └── escalate.py    #   escalation 判定与 OCR/ASR/VLM 风险融合
 ```
 
 分层依赖方向：`api` → `services` → `ai` / `schemas` / `core`。路由层只做校验与编排；`services/video` 包与 `services/audio.py` 通过 `subprocess.run` 以参数列表形式调用 ffprobe/ffmpeg（无 shell）；`services/registry.py` 将任务记录以 `job.json` 落盘，对上层屏蔽存储细节；`services/ocr_pipeline.py` / `services/asr_pipeline.py` 只依赖 `ai.ocr.base` / `ai.asr.base` 的 Provider 抽象与工厂入口，不感知具体引擎（有防回归测试约束）。
@@ -194,13 +205,49 @@ GET /api/videos/{video_id}/events?modality=asr
 
 音频提取的采样率与声道数由 ASR 服务契约固定（16kHz 单声道 PCM wav），不走配置；云端端点、模型名与请求超时走配置（`modal_asr_url` / `asr_primary_model` / `asr_request_timeout_seconds`）。`MODAL_ASR_URL` 未配置（空）时 Provider 初始化抛 `AsrNotConfiguredError`；配置层要求生产端点为 https，禁止 URL 凭据，仅 `http://127.0.0.1` / `http://localhost` 作为本地测试 stub。时间戳对齐模型（Qwen3-ForcedAligner-0.6B）由云端服务内部使用，本地仅以 `asr_aligner_model` 记录标识。OCR 与 ASR 的 `{modality}.json` 均经 `write_modality_events` 原子写入。
 
+## VLM 分支：Frames + OCR/ASR → 云端主审 → TimelineEvent(vlm) → 审核报告
+
+拓扑约束：VLM 推理全部在 Modal 云端（Qwen3-VL-8B-Instruct），本地只跑业务管线——读取已抽帧与已落盘 OCR/ASR，经 HTTPS 调用，不加载任何 VLM 权重。32B 复审本期未部署。
+
+```
+POST /api/videos/{video_id}/review?force=false
+  │
+  ├─ 1. video_id 校验；任务记录不存在 404
+  ├─ 2. frames.json 不存在（未抽帧）返回 409；损坏返回 500
+  ├─ 3. services/vlm_pipeline.run_review 同步执行：
+  │      a. 默认复用已有且完好的 vlm.json（返回 reused=true）；
+  │         损坏的 vlm.json 删除后重跑；force=true 才忽略已有结果
+  │      b. 按 VLM_MAX_FRAMES_PER_REQUEST（默认 8）分批组装契约请求：
+  │         multipart 字段 frames（JPEG）+ model/ocr_text/asr_text/
+  │         context/rules/frame_timestamps_ms
+  │      c. 调用 ai.vlm 的 VlmProvider.review（惰性单例）：
+  │         QwenVlmProvider POST {MODAL_VLM_URL}/review；
+  │         超时抛 VlmTimeoutError（504），网络/非 2xx 抛 VlmServiceError（502），
+  │         结构不符抛 VlmResponseFormatError（502），未配置端点抛
+  │         VlmNotConfiguredError（503）。异常定义在 ai/vlm/base.py
+  │      d. 8B 低置信 / 高风险 / JSON 不合格 / OCR-ASR 模态冲突时尝试 32B；
+  │         云端 501 时保留 8B（或占位结果）并标注 pending_review，不中断主链路
+  │      e. 主审结果按帧时间窗展开为 TimelineEvent（modality='vlm'），
+  │         契约字段写入 metadata；经 write_modality_events 原子落盘 vlm.json
+  └─ 4. 返回 {video_id, modality: 'vlm', event_count, reused, needs_escalation, escalation_status}
+
+GET /api/videos/{video_id}/events?modality=vlm
+  └─ 复用通用事件端点，读取 outputs/{video_id}/vlm.json
+
+GET /api/videos/{video_id}/report
+  └─ 读取 vlm.json + 任务记录 + OCR/ASR 状态，输出结构化报告：
+     视频元信息、各模态运行状态、风险事件按 severity 排序、整体结论与待复审标记；
+     尚未审核 404，文件损坏 500
+```
+
 ## 模型选型与 Provider 抽象
 
 多模态能力的统一约定：每个模态在 `ai/{modality}/base.py` 定义 Provider 抽象（输入输出契约），具体引擎以同接口实现并惰性加载，模型标识全部走 `core/config.py` 配置（禁止散落在业务代码）；业务编排只依赖 base 抽象，更换引擎不影响编排与路由。
 
 - OCR：主模型 PP-OCRv6。`OCR_PROVIDER=local`（默认）使用 `ai/ocr/paddleocr.py` 的 PaddleOcrProvider（PaddleOCR 官方包，默认 CPU）；`OCR_PROVIDER=modal` 使用 `ai/ocr/remote.py` 的 RemoteOcrProvider（HTTPS 客户端，本地不加载 OCR 权重）。备用疑难模型 PaddleOCR-VL-1.6 由配置 `ocr_fallback_model` 记录标识，在 Modal 云端服务内于低置信时调用（`modal/ocr/`），本地 Provider 不加载。模型名、语言、设备、端点见配置项表的 `ocr_*` / `modal_ocr_url` 项。
 - ASR：主模型 Qwen3-ASR-1.7B，部署在 Modal 云端（`ai/asr/qwen_asr.py` 的 QwenAsrProvider 为 HTTPS 客户端，本地不加载模型权重）；时间戳对齐模型 Qwen3-ForcedAligner-0.6B 由云端服务内部使用，本地仅以 `asr_aligner_model` 记录标识。端点、模型名、超时见配置项表的 `modal_asr_url` / `asr_*` 项。
-- 视觉 / VLM / 风险融合：尚未实现，接入时遵循同一 Provider 约定（base 抽象 + 配置驱动 + 惰性加载），产出统一归一到 TimelineEvent。
+- VLM：主模型 Qwen3-VL-8B-Instruct，部署在 Modal 云端（`ai/vlm/qwen.py` 的 QwenVlmProvider 为 HTTPS 客户端，本地不加载模型权重）；32B 复审标识由 `vlm_escalation` 记录，本期未部署。端点、模型名、超时见配置项表的 `modal_vlm_url` / `vlm_*` 项。
+- 风险融合：`ai/vlm/escalate.py` 在 8B 低置信 / 高风险 / JSON 不合格 / 模态冲突时标记 `needs_escalation`；32B 返回 501 时保留 8B 结果并在报告中标注待复审。
 
 ## 前端页面与 API 交互
 
@@ -231,16 +278,16 @@ storage/
 └── outputs/                      # 审核产出
     └── {video_id}/
         ├── ocr.json              # OCR 事件产出（{video_id, modality, events}）
-        └── asr.json              # ASR 事件产出（同结构）
+        ├── asr.json              # ASR 事件产出（同结构）
+        └── vlm.json              # VLM 主审事件产出（同结构）
 ```
 
 ## AI 模块现状
 
-`ai/` 下五个模块中，`ai/ocr` 与 `ai/asr` 已实现（见上文「模型选型与 Provider 抽象」）；`ai/video`、`ai/vlm`、`ai/risk` 仍只有 README 占位：
+`ai/` 下五个模块中，`ai/ocr`、`ai/asr` 与 `ai/vlm` 已实现（见上文「模型选型与 Provider 抽象」）；`ai/video`、`ai/risk` 仍只有 README 占位：
 
 - `ai/video`：视频元数据解析与抽帧（当前该能力由后端 `app/services/video` 包承担）
-- `ai/vlm`：视觉语言大模型理解
-- `ai/risk`：多模态风险融合判定
+- `ai/risk`：独立风险模块占位（本期融合逻辑在 `ai/vlm/escalate.py`）
 
 各模态的产出将归一到 `app/schemas/events.py` 定义的 `TimelineEvent`（含 video_id、模态、起止毫秒、内容、置信度），再由风险模块融合判定，结果写入 `storage/outputs/`。
 
@@ -269,5 +316,13 @@ storage/
 | `asr_primary_model` | `ASR_PRIMARY_MODEL` | `Qwen3-ASR-1.7B` | 主 ASR 模型标识 |
 | `asr_aligner_model` | `ASR_ALIGNER_MODEL` | `Qwen3-ForcedAligner-0.6B` | 时间戳对齐模型标识，仅记录不加载，云端服务内部使用 |
 | `asr_request_timeout_seconds` | `ASR_REQUEST_TIMEOUT_SECONDS` | `120` | 云端 ASR 服务请求超时（秒），必须大于 0 |
+| `vlm_provider` | `VLM_PROVIDER` | `modal` | VLM 部署形态，目前仅 `modal` |
+| `modal_vlm_url` | `MODAL_VLM_URL` | 空 | Modal 云端 VLM 主审 HTTPS 地址（不含路径），未配置时 VLM 不可用；禁止凭据，本地 stub 允许 http://127.0.0.1 / http://localhost |
+| `vlm_primary` | `VLM_PRIMARY` | `qwen3-vl-8b-instruct` | 主审 VLM 模型标识（8B） |
+| `vlm_escalation` | `VLM_ESCALATION` | `qwen3-vl-32b-instruct` | 复审 VLM 模型标识（32B，本期未部署） |
+| `vlm_request_timeout_seconds` | `VLM_REQUEST_TIMEOUT_SECONDS` | `180` | 云端 VLM 服务请求超时（秒），必须大于 0 |
+| `vlm_request_max_retries` | `VLM_REQUEST_MAX_RETRIES` | `1` | 云端 VLM 瞬时失败重试次数（不含首次） |
+| `vlm_max_frames_per_request` | `VLM_MAX_FRAMES_PER_REQUEST` | `8` | 单次主审最大帧数，必须在 1~8 |
+| `vlm_low_confidence_threshold` | `VLM_LOW_CONFIDENCE_THRESHOLD` | `0.6` | 低于该置信度时标记 needs_escalation |
 
 其他相关配置：CORS 允许来源在 `main.py` 中固定为 `http://localhost:5173` / `http://127.0.0.1:5173`（Vite 开发服务器）；前端 API 地址为 `VITE_API_BASE_URL`（默认空串，走 Vite proxy）。

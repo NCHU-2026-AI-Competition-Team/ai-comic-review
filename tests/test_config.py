@@ -108,3 +108,54 @@ def test_modal_ocr_url_missing_scheme_rejected(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("MODAL_OCR_URL", "ocr.example.com")
     with pytest.raises(ValidationError):
         Settings()
+
+
+def test_modal_vlm_url_empty_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODAL_VLM_URL", "")
+    assert Settings().modal_vlm_url == ""
+
+
+def test_modal_vlm_url_https_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODAL_VLM_URL", "https://vlm.example.modal.run")
+    assert Settings().modal_vlm_url == "https://vlm.example.modal.run"
+
+
+def test_modal_vlm_url_localhost_http_allowed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODAL_VLM_URL", "http://127.0.0.1:8000")
+    assert Settings().modal_vlm_url == "http://127.0.0.1:8000"
+    monkeypatch.setenv("MODAL_VLM_URL", "http://localhost:9")
+    assert Settings().modal_vlm_url == "http://localhost:9"
+
+
+def test_modal_vlm_url_http_remote_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODAL_VLM_URL", "http://vlm.example.com")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_modal_vlm_url_credentials_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODAL_VLM_URL", "https://user:pass@vlm.example.com")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_modal_vlm_url_missing_scheme_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MODAL_VLM_URL", "vlm.example.com")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_vlm_provider_default_modal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VLM_PROVIDER", raising=False)
+    assert Settings().vlm_provider == "modal"
+
+
+def test_vlm_provider_invalid_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VLM_PROVIDER", "local")
+    with pytest.raises(ValidationError):
+        Settings()
+
+
+def test_vlm_primary_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VLM_PRIMARY", raising=False)
+    assert Settings().vlm_primary == "qwen3-vl-8b-instruct"

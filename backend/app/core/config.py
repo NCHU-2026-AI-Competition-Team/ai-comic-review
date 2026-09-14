@@ -64,6 +64,25 @@ class Settings(BaseSettings):
     asr_primary_model: str = Field(default="Qwen3-ASR-1.7B", description="主 ASR 模型标识")
     asr_aligner_model: str = Field(default="Qwen3-ForcedAligner-0.6B", description="时间戳对齐模型标识，仅记录不加载，云端服务内部使用")
     asr_request_timeout_seconds: float = Field(default=120.0, gt=0, description="云端 ASR 服务请求超时（秒）")
+    # VLM 配置（ai/vlm 使用）：VLM 推理全部在 Modal 云端，本地仅组装多帧+文本并 HTTPS 调用
+    vlm_provider: str = Field(default="modal", description="VLM 部署形态：modal 云端 HTTPS")
+    modal_vlm_url: str = Field(default="", description="Modal 云端 VLM 主审服务地址（不含路径），未配置时 VLM 不可用")
+    vlm_primary: str = Field(default="qwen3-vl-8b-instruct", description="主审 VLM 模型标识（8B）")
+    vlm_escalation: str = Field(
+        default="qwen3-vl-32b-instruct",
+        description="复审 VLM 模型标识（32B，本期未部署，调用将 501 并降级为待复审）",
+    )
+    vlm_request_timeout_seconds: float = Field(
+        default=180.0, gt=0, description="云端 VLM 服务请求超时（秒），需覆盖冷启动"
+    )
+    vlm_request_max_retries: int = Field(default=1, ge=0, description="云端 VLM 瞬时失败重试次数（不含首次）")
+    vlm_max_frames_per_request: int = Field(
+        default=8, ge=1, le=8, description="单次主审请求最大帧数，与云端契约对齐"
+    )
+    vlm_low_confidence_threshold: float = Field(
+        default=0.6, ge=0.0, le=1.0, description="低于该置信度时标记 needs_escalation"
+    )
+    vlm_review_rules: str = Field(default="", description="审核规则描述；空值时由云端使用通用内容安全规范")
 
     @field_validator("ocr_provider")
     @classmethod
@@ -82,6 +101,19 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_modal_asr_url(cls, value: str) -> str:
         return _validate_modal_service_url(value, "MODAL_ASR_URL")
+
+    @field_validator("vlm_provider")
+    @classmethod
+    def _validate_vlm_provider(cls, value: str) -> str:
+        name = (value or "modal").strip().lower()
+        if name not in {"modal"}:
+            raise ValueError("VLM_PROVIDER 仅允许 modal")
+        return name
+
+    @field_validator("modal_vlm_url")
+    @classmethod
+    def _validate_modal_vlm_url(cls, value: str) -> str:
+        return _validate_modal_service_url(value, "MODAL_VLM_URL")
 
     @property
     def storage_path(self) -> Path:

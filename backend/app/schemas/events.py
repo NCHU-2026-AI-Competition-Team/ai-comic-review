@@ -37,3 +37,19 @@ class ModalityRunResponse(BaseModel):
     modality: EventModality
     event_count: int = Field(ge=0, description="本次产出的事件数量")
     reused: bool = Field(default=False, description="是否复用了已有落盘结果")
+
+
+EscalationStatus = Literal["not_needed", "pending_review", "completed"]
+
+
+class ReviewRunResponse(BaseModel):
+    """VLM 审核执行接口的响应模型。"""
+
+    video_id: str
+    modality: EventModality = "vlm"
+    event_count: int = Field(ge=0, description="本次产出的事件数量")
+    reused: bool = Field(default=False, description="是否复用了已有落盘结果")
+    needs_escalation: bool = Field(default=False, description="是否需要 32B 复审或人工待复审")
+    escalation_status: EscalationStatus = Field(
+        default="not_needed", description="复审状态：无需 / 待复审 / 已复审"
+    )

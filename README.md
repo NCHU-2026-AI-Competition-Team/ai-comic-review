@@ -10,6 +10,7 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 - 镜头切换检测：可选 scene 采样模式，基于 ffmpeg 场景分数识别镜头边界并逐边界精确抽帧（阈值与帧数上限可配置）
 - 画面文字识别（OCR）：基于 PaddleOCR（主模型 PP-OCRv6）逐帧识别文字，聚合为统一时间线事件（TimelineEvent）并落盘 `ocr.json`；前端一键触发并展示识别结果
 - 语音识别（ASR）：基于 ffmpeg 提取单声道 16kHz PCM 音轨，上传至 Modal 云端 ASR 服务（Qwen3-ASR-1.7B，HTTPS 调用，本地不加载模型权重）识别语音，聚合为统一时间线事件并落盘 `asr.json`；前端一键触发并展示分段文本/时间段/置信度
+- 视觉审核（VLM）：把已抽帧 JPEG + 已落盘 OCR/ASR 文本组装为契约请求，调用 Modal 云端 Qwen3-VL-8B 主审，产出 `vlm.json` 时间线事件与结构化审核报告；32B 复审未部署时保留 8B 结果并标注待复审
 - 状态查询：查询视频任务状态（processing / processed / failed）、帧清单与帧图片
 - 前端页面：拖拽/点选上传、采样模式选择、处理状态轮询、元数据与帧网格展示、OCR / ASR 事件列表
 
@@ -29,7 +30,7 @@ AI 漫画/视频内容审核系统（开发中）。当前阶段已实现：上�
 │   ├── ocr/                #   画面文字识别：base.py Provider 抽象 + paddleocr.py PP-OCRv6 实现 + factory.py 默认 Provider 入口
 │   ├── risk/               #   多模态风险融合判定（占位）
 │   ├── video/              #   视频元数据解析与抽帧（占位，当前由后端 services/video 承担）
-│   └── vlm/                #   视觉语言大模型理解（占位）
+│   └── vlm/                #   视觉语言大模型主审：base.py 抽象 + schemas.py 严格 JSON + qwen.py Modal HTTPS 客户端 + factory.py + escalate.py
 ├── backend/
 │   ├── app/
 │   │   ├── api/            # 路由层：health.py、videos.py（上传/查询/OCR/ASR/事件）
@@ -76,7 +77,9 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 - `GET /api/videos/{video_id}/frames/{filename}` — 帧图片
 - `POST /api/videos/{video_id}/ocr` — 对已完成抽帧的视频同步执行 OCR（未抽帧返回 409）
 - `POST /api/videos/{video_id}/asr` — 对视频同步执行 ASR（自动提取音频并调用云端识别；默认复用已有 `asr.json` 并标注 `reused`；`?force=true` 才重跑。原始文件缺失或无音轨返回 409；云端超时 504、服务异常 502、未配置端点 503）
-- `GET /api/videos/{video_id}/events?modality=ocr|asr` — 查询已生成的模态时间线事件
+- `POST /api/videos/{video_id}/review` — 对已抽帧视频同步执行 VLM 主审（组装帧 + OCR/ASR 文本调用云端 `/review`；默认复用已有 `vlm.json`；`?force=true` 才重跑。未抽帧 409；云端超时 504、服务异常 502、未配置端点 503）。高风险/低置信/JSON 不合格/模态冲突会尝试 32B 复审，未部署时保留 8B 并标注 `needs_escalation`
+- `GET /api/videos/{video_id}/report` — 结构化审核报告（视频元信息、各模态运行状态、风险事件按 severity 排序、整体结论与待复审标记）
+- `GET /api/videos/{video_id}/events?modality=ocr|asr|vlm` — 查询已生成的模态时间线事件
 
 ### 前端（本地）
 
@@ -116,6 +119,7 @@ OCR 说明：引擎为 PaddleOCR 官方包（`paddleocr` + CPU 版 `paddlepaddle
 
 - `POST /api/videos/{video_id}/ocr` 为同步执行：长视频逐帧识别会长时间占用 worker 连接与事件循环。后续切片将改为异步任务（提交后立即返回任务 ID，提供状态查询接口），当前阶段调用方需容忍较长响应时间。
 - `POST /api/videos/{video_id}/asr` 同为同步执行，长音频的云端识别耗时同样由调用方容忍；ASR 依赖外部 Modal 服务部署（`MODAL_ASR_URL`），其可用性不在本仓库保障范围内。
+- `POST /api/videos/{video_id}/review` 同为同步执行；VLM 云端冷启动约 1~2 分钟，首次审核需容忍较长响应。32B 复审未部署，高风险/低置信等场景会标注待复审而非阻断。
 
 ## 配置项
 
@@ -138,3 +142,11 @@ OCR 说明：引擎为 PaddleOCR 官方包（`paddleocr` + CPU 版 `paddlepaddle
 | `ASR_PRIMARY_MODEL` | `Qwen3-ASR-1.7B` | 主 ASR 模型标识 |
 | `ASR_ALIGNER_MODEL` | `Qwen3-ForcedAligner-0.6B` | 时间戳对齐模型标识（仅记录，云端服务内部使用） |
 | `ASR_REQUEST_TIMEOUT_SECONDS` | `120` | 云端 ASR 服务请求超时（秒） |
+| `MODAL_VLM_URL` | 空 | Modal 云端 VLM 主审服务 HTTPS 地址（不含路径）。未配置（空）时 VLM 不可用；禁止 URL 凭据，本地测试 stub 允许 `http://127.0.0.1` / `http://localhost` |
+| `VLM_PROVIDER` | `modal` | VLM 部署形态，目前仅 `modal` |
+| `VLM_PRIMARY` | `qwen3-vl-8b-instruct` | 主审 VLM 模型标识（8B） |
+| `VLM_ESCALATION` | `qwen3-vl-32b-instruct` | 复审 VLM 模型标识（32B，本期未部署） |
+| `VLM_REQUEST_TIMEOUT_SECONDS` | `180` | 云端 VLM 服务请求超时（秒） |
+| `VLM_REQUEST_MAX_RETRIES` | `1` | 云端 VLM 瞬时失败重试次数（不含首次） |
+| `VLM_MAX_FRAMES_PER_REQUEST` | `8` | 单次主审最大帧数 |
+| `VLM_LOW_CONFIDENCE_THRESHOLD` | `0.6` | 低于该置信度时标记 needs_escalation |

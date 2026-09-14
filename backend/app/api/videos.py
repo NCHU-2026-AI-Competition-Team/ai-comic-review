@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from app.core.config import ROOT_DIR, get_settings
 from app.core.ids import InvalidVideoIdError, normalize_video_id
 
-# uvicorn 从 backend/ 启动时仓库根不在 sys.path；抽象异常定义在 ai.asr.base
+# uvicorn 从 backend/ 启动时仓库根不在 sys.path；抽象异常定义在 ai.asr.base / ai.vlm.base
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
@@ -23,14 +23,22 @@ from ai.asr.base import (  # noqa: E402
     AsrServiceError,
     AsrTimeoutError,
 )
+from ai.vlm.base import (  # noqa: E402
+    VlmNotConfiguredError,
+    VlmResponseFormatError,
+    VlmServiceError,
+    VlmTimeoutError,
+)
 from app.schemas.events import (
     EventModality,
     ModalityEventsFile,
     ModalityRunResponse,
+    ReviewRunResponse,
     TimelineEvent,
 )
+from app.schemas.report import ReviewReport
 from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
-from app.services import asr_pipeline, audio, ocr_pipeline, registry
+from app.services import asr_pipeline, audio, ocr_pipeline, registry, vlm_pipeline
 from app.services.modality_store import modality_result_path
 from app.services.storage_paths import UnsafePathError, resolve_in_dir
 from app.services.uploads import ALLOWED_VIDEO_EXTENSIONS, UploadNotFoundError, find_uploaded_file
@@ -347,6 +355,73 @@ def run_video_asr(
         event_count=len(outcome.events),
         reused=outcome.reused,
     )
+
+
+@router.post("/{video_id}/review", response_model=ReviewRunResponse)
+def run_video_review(
+    video_id: str,
+    force: bool = Query(False, description="为 true 时忽略已有 vlm.json 强制重跑"),
+) -> ReviewRunResponse:
+    """对已完成抽帧的视频同步执行 VLM 主审，产出 vlm 模态时间线事件。
+
+    默认复用已有 vlm.json 并标注 reused=true；force=true 才重新审核。
+    读取已落盘的 OCR/ASR 作为文本上下文（缺失则留空）。
+    32B 复审未部署时保留 8B 结果并标注 needs_escalation / 待复审。
+    """
+    video_id = _validate_video_id(video_id)
+    try:
+        job = registry.get_job(video_id)
+    except registry.JobCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="任务记录文件损坏") from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    try:
+        outcome = vlm_pipeline.run_review(video_id, force=force)
+    except vlm_pipeline.FramesNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="尚未完成抽帧，请先完成视频处理") from exc
+    except vlm_pipeline.FramesCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="帧清单文件损坏") from exc
+    except VlmTimeoutError as exc:
+        raise HTTPException(status_code=504, detail="云端视觉审核超时") from exc
+    except VlmNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail="未配置云端 VLM 服务端点") from exc
+    except (VlmServiceError, VlmResponseFormatError) as exc:
+        raise HTTPException(status_code=502, detail="云端视觉审核服务异常") from exc
+    return ReviewRunResponse(
+        video_id=video_id,
+        modality="vlm",
+        event_count=len(outcome.events),
+        reused=outcome.reused,
+        needs_escalation=outcome.needs_escalation,
+        escalation_status=outcome.escalation_status,
+    )
+
+
+@router.get("/{video_id}/report", response_model=ReviewReport)
+def get_video_report(video_id: str) -> ReviewReport:
+    """读取结构化审核报告：视频元信息、各模态状态、风险事件与整体结论。"""
+    video_id = _validate_video_id(video_id)
+    try:
+        job = registry.get_job(video_id)
+    except registry.JobCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="任务记录文件损坏") from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    events_file = modality_result_path(video_id, "vlm")
+    if not events_file.is_file():
+        raise HTTPException(status_code=404, detail="审核报告尚未生成")
+    try:
+        data = json.loads(events_file.read_text(encoding="utf-8"))
+        events_payload = ModalityEventsFile.model_validate(data)
+        if events_payload.video_id != video_id or events_payload.modality != "vlm":
+            raise ValueError(
+                f"事件文件与请求不一致：文件 video_id={events_payload.video_id} "
+                f"modality={events_payload.modality}"
+            )
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.error("审核结果损坏 video_id=%s: %s", video_id, exc)
+        raise HTTPException(status_code=500, detail="审核结果文件损坏") from exc
+    return vlm_pipeline.build_review_report(video_id, events_payload.events)
 
 
 @router.get("/{video_id}/events", response_model=list[TimelineEvent])
