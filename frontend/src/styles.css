@@ -331,3 +331,233 @@ button.primary:disabled {
   font-size: 13px;
   margin-top: 40px;
 }
+
+/* Workbench Layout */
+.workbench-layout {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.workbench-top {
+  margin-bottom: 0;
+}
+
+.workbench-main {
+  display: flex;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.workbench-left {
+  flex: 1;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.workbench-video {
+  width: 100%;
+  display: block;
+  max-height: 500px;
+  object-fit: contain;
+}
+
+.workbench-right {
+  width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  flex-shrink: 0;
+}
+
+/* Modality Panels */
+.modality-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.modality-panel h3 {
+  margin-top: 0;
+}
+
+.modality-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Timeline */
+.timeline-swimlanes {
+  position: relative;
+}
+
+.swimlanes-container {
+  position: relative;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 0;
+  overflow: hidden;
+  user-select: none;
+}
+
+.swimlanes-cursor {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background-color: #ff3b30;
+  z-index: 10;
+  pointer-events: none;
+}
+
+.swimlane {
+  display: flex;
+  align-items: center;
+  height: 36px;
+  padding: 0 10px;
+  gap: 10px;
+}
+
+.swimlane-label {
+  width: 60px;
+  font-size: 12px;
+  font-weight: bold;
+  color: var(--text-dim);
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.swimlane-track {
+  flex: 1;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  position: relative;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.swimlane-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.swimlane-event {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 2px;
+  opacity: 0.8;
+}
+
+.swimlane-event:hover {
+  opacity: 1;
+  filter: brightness(1.2);
+}
+
+/* Collapsible */
+.frames-collapsible summary {
+  cursor: pointer;
+  font-weight: bold;
+  font-size: 16px;
+  outline: none;
+  padding: 8px 0;
+}
+
+/* Risk Report */
+.risk-report-panel {
+  flex: 1;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.risk-report-panel h2 {
+  font-size: 18px;
+  margin-bottom: 12px;
+}
+
+.risk-empty {
+  color: var(--text-dim);
+  font-size: 13px;
+  padding: 12px 0;
+}
+
+.risk-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.risk-item {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 14px;
+}
+
+.risk-header {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.risk-severity {
+  font-weight: bold;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.severity-high, .severity-HIGH {
+  background: rgba(224, 92, 92, 0.2);
+  color: #ff5252;
+}
+
+.severity-medium, .severity-MEDIUM {
+  background: rgba(255, 152, 0, 0.2);
+  color: #ff9800;
+}
+
+.severity-low, .severity-LOW {
+  background: rgba(76, 175, 80, 0.2);
+  color: #4caf50;
+}
+
+.severity-info, .severity-INFO {
+  background: rgba(91, 140, 255, 0.2);
+  color: var(--accent);
+}
+
+.risk-time {
+  color: var(--text-dim);
+}
+
+.risk-category {
+  font-weight: bold;
+  margin-bottom: 4px;
+  color: var(--accent);
+}
+
+.risk-content {
+  margin-bottom: 8px;
+}
+
+.risk-reason, .risk-suggestion {
+  color: var(--text-dim);
+  font-size: 13px;
+  margin-top: 4px;
+}

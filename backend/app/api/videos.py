@@ -6,8 +6,8 @@ import sys
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Form, HTTPException, Query, UploadFile, Request, Response
+from fastapi.responses import FileResponse, StreamingResponse
 
 from app.core.config import ROOT_DIR, get_settings
 from app.core.ids import InvalidVideoIdError, normalize_video_id
@@ -145,6 +145,67 @@ def get_video(video_id: str) -> VideoJob:
     if job is None:
         raise HTTPException(status_code=404, detail="视频不存在")
     return job
+
+
+@router.get("/{video_id}/file")
+def get_video_file(video_id: str, request: Request) -> Response:
+    """流式返回原始视频，支持 HTTP Range。"""
+    from fastapi import Request, Response
+    from fastapi.responses import StreamingResponse, FileResponse
+    from app.services.uploads import UploadNotFoundError, find_uploaded_file
+
+    video_id = _validate_video_id(video_id)
+    try:
+        video_path = find_uploaded_file(video_id)
+    except UploadNotFoundError:
+        raise HTTPException(status_code=404, detail="视频文件不存在") from None
+
+    file_size = video_path.stat().st_size
+    range_header = request.headers.get("range")
+
+    if not range_header:
+        return FileResponse(video_path, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
+
+    try:
+        range_match = range_header.replace("bytes=", "").split("-")
+        start = int(range_match[0]) if range_match[0] else 0
+        end = int(range_match[1]) if len(range_match) > 1 and range_match[1] else file_size - 1
+    except ValueError:
+        raise HTTPException(status_code=416, detail="Requested Range Not Satisfiable")
+
+    if start >= file_size or end >= file_size or start > end:
+        raise HTTPException(
+            status_code=416,
+            detail="Requested Range Not Satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+
+    chunk_size = end - start + 1
+
+    def file_iterator(path: Path, start_pos: int, chunk_sz: int):
+        with open(path, "rb") as f:
+            f.seek(start_pos)
+            bytes_read = 0
+            while bytes_read < chunk_sz:
+                read_size = min(1024 * 1024, chunk_sz - bytes_read)
+                data = f.read(read_size)
+                if not data:
+                    break
+                bytes_read += len(data)
+                yield data
+
+    headers = {
+        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(chunk_size),
+    }
+    return StreamingResponse(
+        file_iterator(video_path, start, chunk_size),
+        status_code=206,
+        media_type="video/mp4",
+        headers=headers
+    )
+
 
 
 @router.get("/{video_id}/frames", response_model=FramesInfo)

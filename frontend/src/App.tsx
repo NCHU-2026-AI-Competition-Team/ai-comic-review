@@ -4,8 +4,10 @@ import VideoInfoPanel from './components/VideoInfoPanel'
 import FramesGrid from './components/FramesGrid'
 import OcrPanel from './components/OcrPanel'
 import AsrPanel from './components/AsrPanel'
+import TimelineSwimlanes from './components/TimelineSwimlanes'
+import RiskReportPanel from './components/RiskReportPanel'
 import { ApiError, getFrames, getVideo, uploadVideo } from './api/videos'
-import type { FramesInfo, SamplingMode, VideoJob, VideoUploadResponse } from './types'
+import type { FramesInfo, SamplingMode, TimelineEvent, VideoJob, VideoUploadResponse } from './types'
 
 type Phase = 'idle' | 'uploading' | 'processing' | 'processed' | 'failed' | 'error'
 
@@ -31,6 +33,20 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   const cancelRef = useRef<(() => void) | null>(null)
 
+  const [events, setEvents] = useState<{
+    ocr: TimelineEvent[]
+    asr: TimelineEvent[]
+    vision: TimelineEvent[]
+    vlm: TimelineEvent[]
+  }>({
+    ocr: [],
+    asr: [],
+    vision: [],
+    vlm: [],
+  })
+  const [currentTimeMs, setCurrentTimeMs] = useState(0)
+  const videoRef = useRef<HTMLVideoElement>(null)
+
   useEffect(() => {
     return () => cancelRef.current?.()
   }, [])
@@ -40,11 +56,9 @@ export default function App() {
       setFramesInfo(await getFrames(videoId))
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
-        // 帧清单尚未生成时退回任务记录中携带的帧信息
         setFramesInfo(fallback)
         return
       }
-      // 500 / 网络异常 / frames.json 损坏等明确告知用户，不再静默回退
       setError(err instanceof Error ? err.message : '帧清单加载失败')
       setPhase('error')
     }
@@ -91,6 +105,8 @@ export default function App() {
       setPhase('uploading')
       setError(null)
       setFramesInfo(null)
+      setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
+      setCurrentTimeMs(0)
       try {
         const upload = await uploadVideo(file, sampling)
         const initial = toJob(upload)
@@ -118,6 +134,8 @@ export default function App() {
     setJob(null)
     setFramesInfo(null)
     setError(null)
+    setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
+    setCurrentTimeMs(0)
     setPhase('idle')
   }, [])
 
@@ -161,27 +179,58 @@ export default function App() {
         )}
 
         {phase === 'processed' && job && (
-          <section className="panel">
-            <h2>处理结果</h2>
-            <VideoInfoPanel
-              filename={job.filename}
-              metadata={job.metadata}
-              sampling={framesInfo?.sampling ?? job.frames?.sampling ?? null}
-              frameCount={framesInfo?.count ?? job.frames?.count ?? null}
+          <div className="workbench-layout">
+            <div className="workbench-top panel">
+              <VideoInfoPanel
+                filename={job.filename}
+                metadata={job.metadata}
+                sampling={framesInfo?.sampling ?? job.frames?.sampling ?? null}
+                frameCount={framesInfo?.count ?? job.frames?.count ?? null}
+              />
+            </div>
+
+            <div className="workbench-main">
+              <div className="workbench-left">
+                <video
+                  ref={videoRef}
+                  className="workbench-video"
+                  controls
+                  src={`/api/videos/${job.video_id}/file`}
+                  onTimeUpdate={(e) => setCurrentTimeMs(e.currentTarget.currentTime * 1000)}
+                />
+              </div>
+              <div className="workbench-right">
+                <RiskReportPanel vlmEvents={events.vlm} />
+                <div className="modality-actions">
+                  <OcrPanel videoId={job.video_id} onEvents={(evs) => setEvents((prev) => ({ ...prev, ocr: evs }))} />
+                  <AsrPanel videoId={job.video_id} onEvents={(evs) => setEvents((prev) => ({ ...prev, asr: evs }))} />
+                </div>
+              </div>
+            </div>
+
+            <TimelineSwimlanes
+              duration={job.metadata?.duration ?? null}
+              currentTimeMs={currentTimeMs}
+              events={events}
+              onSeek={(ms) => {
+                if (videoRef.current) {
+                  videoRef.current.currentTime = ms / 1000
+                  videoRef.current.play().catch(() => {})
+                }
+              }}
             />
-            {framesInfo && <FramesGrid videoId={job.video_id} framesInfo={framesInfo} />}
-            <OcrPanel videoId={job.video_id} />
-            <AsrPanel videoId={job.video_id} />
-            <button className="primary" type="button" onClick={handleReset}>
+
+            <details className="frames-collapsible panel">
+              <summary>查看抽取帧 ({framesInfo?.count ?? 0})</summary>
+              {framesInfo && <FramesGrid videoId={job.video_id} framesInfo={framesInfo} />}
+            </details>
+
+            <button className="primary" type="button" onClick={handleReset} style={{ marginTop: 24 }}>
               处理新视频
             </button>
-          </section>
+          </div>
         )}
       </main>
-
-      <footer className="app-footer">
-        <p>AI Comic Review · 视频解析与抽帧</p>
-      </footer>
     </div>
   )
 }

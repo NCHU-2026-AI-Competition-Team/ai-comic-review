@@ -5,20 +5,28 @@ import { formatTimestamp } from './FramesGrid'
 
 interface Props {
   videoId: string
+  onEvents?: (events: TimelineEvent[]) => void
 }
 
 /** ASR 面板：触发语音识别并展示 asr 模态时间线事件（时间段 + 文本 + 置信度）。 */
-export default function AsrPanel({ videoId }: Props) {
+export default function AsrPanel({ videoId, onEvents }: Props) {
   const [events, setEvents] = useState<TimelineEvent[] | null>(null)
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [reused, setReused] = useState(false)
 
   const handleRun = useCallback(async () => {
     setRunning(true)
     setError(null)
+    setEvents(null)
+    setReused(false)
+    if (onEvents) onEvents([])
     try {
-      await runAsr(videoId)
-      setEvents(await getEvents(videoId, 'asr'))
+      const res = await runAsr(videoId)
+      setReused(res.reused ?? false)
+      const newEvents = await getEvents(videoId, 'asr')
+      setEvents(newEvents)
+      if (onEvents) onEvents(newEvents)
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setError(err.message)
@@ -28,14 +36,15 @@ export default function AsrPanel({ videoId }: Props) {
     } finally {
       setRunning(false)
     }
-  }, [videoId])
+  }, [videoId, onEvents])
 
   return (
-    <div className="asr-panel">
+    <div className="modality-panel asr-panel">
       <h3>语音识别（ASR）</h3>
       <button className="primary" type="button" disabled={running} onClick={handleRun}>
         {running ? 'ASR 识别中……' : '运行 ASR'}
       </button>
+      {reused && <p className="hint">已复用上次成功结果</p>}
       {error && <p className="form-error">{error}</p>}
       {events && events.length === 0 && <p className="hint">未识别到任何语音</p>}
       {events && events.length > 0 && (
@@ -54,3 +63,4 @@ export default function AsrPanel({ videoId }: Props) {
     </div>
   )
 }
+

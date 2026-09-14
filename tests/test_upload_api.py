@@ -271,3 +271,33 @@ def test_get_frame_image_rejects_disallowed_suffix(client: TestClient) -> None:
     (frames_dir / "notes.txt").write_text("secret", encoding="utf-8")
     response = client.get(f"/api/videos/{VALID_VIDEO_ID}/frames/notes.txt")
     assert response.status_code == 404
+
+def test_get_video_file_success(client: TestClient) -> None:
+    upload_dir = get_settings().uploads_path
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / f"{VALID_VIDEO_ID}.mp4").write_bytes(b"test video content")
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file")
+    assert response.status_code == 200
+    assert response.headers["Accept-Ranges"] == "bytes"
+    assert response.content == b"test video content"
+
+def test_get_video_file_range_request(client: TestClient) -> None:
+    upload_dir = get_settings().uploads_path
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / f"{VALID_VIDEO_ID}.mp4").write_bytes(b"test video content")
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=5-9"})
+    assert response.status_code == 206
+    assert response.headers["Accept-Ranges"] == "bytes"
+    assert response.headers["Content-Length"] == "5"
+    assert response.headers["Content-Range"] == "bytes 5-9/18"
+    assert response.content == b"video"
+
+def test_get_video_file_not_found(client: TestClient) -> None:
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file")
+    assert response.status_code == 404
+    assert "视频文件不存在" in response.json()["detail"]
+
+def test_get_video_file_invalid_id_format(client: TestClient) -> None:
+    response = client.get("/api/videos/not-a-valid-id/file")
+    assert response.status_code == 400
+    assert "video_id 格式非法" in response.json()["detail"]

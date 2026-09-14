@@ -69,4 +69,5 @@ export interface ModalityRunResponse {
   video_id: string
   modality: EventModality
   event_count: number
+  reused?: boolean
 }
