@@ -4,13 +4,17 @@ HTTPS 契约与 ai/ocr/base.py 的 OcrTextLine 对齐：
 POST /recognize（multipart 字段 file 上传 JPEG，表单字段 model 携带模型标识）
 → JSON {"lines":[{"text","bbox","confidence"}]}。
 空图/无文字返回空 lines；畸形输入返回 4xx。
+
+PaddleOCR-VL-1.6 必须在 @modal.enter 预加载并 warmup：懒加载会把权重加载 +
+首次 generate 算进请求 timeout，冷容器经常撞 300s 被杀，下次再冷启动形成死循环。
 """
 
+import asyncio
 import io
 import logging
 import os
 import sys
-import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +28,14 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 from contract import needs_fallback, parse_ppocr_results, parse_vl_results
+from runtime import (
+    create_vl_engine,
+    dummy_jpeg_bytes,
+    elapsed_seconds,
+    log_step,
+    parse_predict,
+    warmup_engine,
+)
 
 _config_path = _HERE / "config.yaml"
 with open(_config_path, encoding="utf-8") as _f:
@@ -34,8 +46,9 @@ GPU_COUNT = CFG["gpu"].get("count", 1)
 APP_NAME = CFG["serving"].get("app_name", "ai-comic-review-ocr")
 IDLE_TIMEOUT = CFG["serving"].get("container_idle_timeout", 300)
 MAX_CONCURRENT = CFG["serving"].get("max_concurrent_requests", 1)
-REQUEST_TIMEOUT = CFG["serving"].get("request_timeout", 300)
+REQUEST_TIMEOUT = CFG["serving"].get("request_timeout", 600)
 STARTUP_TIMEOUT = CFG["serving"].get("startup_timeout", 1800)
+PRELOAD_FALLBACK = bool(CFG["serving"].get("preload_fallback", True))
 PRIMARY_MODEL = CFG["models"]["primary"]
 FALLBACK_MODEL = CFG["models"]["fallback"]
 OCR_LANG = CFG["models"].get("lang", "ch")
@@ -85,10 +98,13 @@ ocr_image = (
             "HF_HUB_CACHE": HF_HOME,
             "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
             "FLAGS_use_mkldnn": "0",
+            # 避免首次 VL generate 才懒编译 CUDA 模块，把耗时挤进请求 timeout
+            "CUDA_MODULE_LOADING": "EAGER",
         }
     )
     .add_local_file(str(_config_path), remote_path="/root/config.yaml")
     .add_local_python_source("contract")
+    .add_local_python_source("runtime")
 )
 
 model_cache = modal.Volume.from_name("ai-comic-ocr-cache", create_if_missing=True)
@@ -107,82 +123,85 @@ GPU_STR = f"{GPU_TYPE}:{GPU_COUNT}"
 )
 @modal.concurrent(max_inputs=MAX_CONCURRENT)
 class OcrService:
-    """GPU 容器：主模型常驻，VL 兜底同容器懒加载。"""
+    """GPU 容器：主模型与 VL 兜底均在启动时预加载并 warmup。"""
 
     primary: Any
     fallback: Any
 
     @modal.enter()
     def setup(self) -> None:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        )
         os.makedirs(PADDLEX_HOME, exist_ok=True)
         os.makedirs(HF_HOME, exist_ok=True)
+        started = time.perf_counter()
+        self.primary = self._load_primary()
+        self.fallback = None
+        if PRELOAD_FALLBACK:
+            self.fallback = self._load_fallback()
+        warmup_jpeg = dummy_jpeg_bytes()
+        log_step(f"开始 warmup 主模型 {PRIMARY_MODEL}")
+        warmup_started = time.perf_counter()
+        warmup_engine(self.primary, warmup_jpeg)
+        log_step(f"主模型 warmup 完成，耗时 {elapsed_seconds(warmup_started):.1f}s")
+        if self.fallback is not None:
+            log_step(f"开始 warmup 兜底模型 {FALLBACK_MODEL}")
+            warmup_started = time.perf_counter()
+            warmup_engine(self.fallback, warmup_jpeg)
+            log_step(f"兜底模型 warmup 完成，耗时 {elapsed_seconds(warmup_started):.1f}s")
+        model_cache.commit()
+        log_step(f"OCR 容器启动完成，总耗时 {elapsed_seconds(started):.1f}s")
+
+    def _load_primary(self) -> Any:
         from paddleocr import PaddleOCR
 
-        logger.info("加载主 OCR 模型 %s（gpu）", PRIMARY_MODEL)
-        self.primary = PaddleOCR(
+        log_step(f"加载主 OCR 模型 {PRIMARY_MODEL}（gpu）")
+        started = time.perf_counter()
+        engine = PaddleOCR(
             ocr_version=PRIMARY_MODEL,
             lang=OCR_LANG,
             device="gpu",
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
         )
-        self.fallback = None
-        self._warmup_primary()
-        model_cache.commit()
+        log_step(f"主模型 pipeline 初始化完成，耗时 {elapsed_seconds(started):.1f}s")
+        return engine
 
-    def _warmup_primary(self) -> None:
-        from PIL import Image
-
-        buf = io.BytesIO()
-        Image.new("RGB", (64, 64), (255, 255, 255)).save(buf, format="JPEG")
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(buf.getvalue())
-            path = tmp.name
-        try:
-            self.primary.predict(path)
-        finally:
-            os.unlink(path)
-
-    def _get_fallback(self) -> Any:
-        if self.fallback is not None:
-            return self.fallback
+    def _load_fallback(self) -> Any:
         from paddleocr import PaddleOCRVL
 
         # paddleocr 3.7 本地推理后端名为 native（文档旧称 paddle），T4 不用 vllm-server
-        logger.info("加载兜底模型 %s（pipeline_version=v1.6, vl_rec_backend=native）", FALLBACK_MODEL)
-        try:
-            self.fallback = PaddleOCRVL(
-                pipeline_version="v1.6",
-                vl_rec_backend="native",
-                device="gpu",
-            )
-        except TypeError as exc:
-            raise RuntimeError(
-                "当前 paddleocr 不支持 pipeline_version='v1.6'，"
-                "拒绝静默回退到默认 PaddleOCR-VL-1.5"
-            ) from exc
-        model_cache.commit()
-        return self.fallback
+        log_step(
+            f"加载兜底模型 {FALLBACK_MODEL}（pipeline_version=v1.6, vl_rec_backend=native）"
+        )
+        started = time.perf_counter()
+        engine = create_vl_engine(PaddleOCRVL)
+        log_step(f"VL pipeline / 权重加载完成，耗时 {elapsed_seconds(started):.1f}s")
+        return engine
 
-    def _predict_file(self, engine: Any, image_bytes: bytes, parser) -> list[dict[str, Any]]:
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            tmp.write(image_bytes)
-            path = tmp.name
-        try:
-            results = engine.predict(path)
-        finally:
-            os.unlink(path)
-        return parser(results)
+    def _require_fallback(self) -> Any:
+        if self.fallback is not None:
+            return self.fallback
+        # 仅当配置显式关闭预加载时才走请求路径加载；默认禁止，以免再撞函数超时
+        if not PRELOAD_FALLBACK:
+            log_step("配置关闭了 VL 预加载，改为请求路径加载（不推荐）")
+            self.fallback = self._load_fallback()
+            return self.fallback
+        raise RuntimeError(
+            f"{FALLBACK_MODEL} 未在容器启动时加载，拒绝在请求路径中懒加载"
+        )
 
     def _run_primary(self, image_bytes: bytes) -> list[dict[str, Any]]:
-        return self._predict_file(self.primary, image_bytes, parse_ppocr_results)
+        return parse_predict(self.primary, image_bytes, parse_ppocr_results)
 
     def _run_vl(self, image_bytes: bytes) -> list[dict[str, Any]]:
-        return self._predict_file(self._get_fallback(), image_bytes, parse_vl_results)
+        return parse_predict(self._require_fallback(), image_bytes, parse_vl_results)
 
     @modal.method()
     def recognize_fallback(self, image_bytes: bytes) -> list[dict[str, Any]]:
-        """独立函数：仅低置信或显式指定 PaddleOCR-VL-1.6 时调用。"""
+        """独立方法：显式指定 PaddleOCR-VL-1.6 或低置信兜底时复用已预加载引擎。"""
         return self._run_vl(image_bytes)
 
     def recognize_bytes(self, image_bytes: bytes, model: str) -> list[dict[str, Any]]:
@@ -191,7 +210,7 @@ class OcrService:
         lines = self._run_primary(image_bytes)
         if not needs_fallback(lines, FALLBACK_THRESHOLD):
             return lines
-        logger.info("最低置信度低于 %.2f，调用 %s 兜底", FALLBACK_THRESHOLD, FALLBACK_MODEL)
+        log_step(f"最低置信度低于 {FALLBACK_THRESHOLD:.2f}，调用 {FALLBACK_MODEL} 兜底")
         try:
             vl_lines = self._run_vl(image_bytes)
         except Exception as exc:
@@ -227,7 +246,12 @@ class OcrService:
 
         @api.get("/health")
         def health() -> dict:
-            return {"status": "ok", "primary": PRIMARY_MODEL, "fallback": FALLBACK_MODEL}
+            return {
+                "status": "ok",
+                "primary": PRIMARY_MODEL,
+                "fallback": FALLBACK_MODEL,
+                "fallback_ready": self.fallback is not None,
+            }
 
         @api.post("/recognize")
         async def recognize(request: Request) -> dict:
@@ -256,7 +280,8 @@ class OcrService:
                 data = data.encode("utf-8")
             _read_jpeg(data)
             try:
-                lines = self.recognize_bytes(data, model_id)
+                # GPU 推理是阻塞调用，放到线程以免卡住 ASGI 事件循环
+                lines = await asyncio.to_thread(self.recognize_bytes, data, model_id)
             except HTTPException:
                 raise
             except ValueError as exc:
@@ -273,5 +298,6 @@ class OcrService:
 def main() -> None:
     """本地入口：提示用 HTTPS /recognize 验证契约（见 README.md）。"""
     print(f"App={APP_NAME} GPU={GPU_STR} primary={PRIMARY_MODEL} fallback={FALLBACK_MODEL}")
+    print(f"timeout={REQUEST_TIMEOUT}s startup_timeout={STARTUP_TIMEOUT}s preload_fallback={PRELOAD_FALLBACK}")
     print("部署：modal deploy modal/ocr/serve.py")
     print("验证：POST {URL}/recognize  multipart file=JPEG  form model=PP-OCRv6")

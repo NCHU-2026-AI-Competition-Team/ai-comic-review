@@ -3,16 +3,17 @@
 
 # --- GPU ---
 gpu:
-  type: "T4"                     # OCR 体量用 T4 即可；PaddleOCR-VL-1.6（0.9B）同卡懒加载
+  type: "T4"                     # OCR 体量用 T4 即可；PaddleOCR-VL-1.6（0.9B）同卡预加载
   count: 1
 
 # --- Serving ---
 serving:
   app_name: "ai-comic-review-ocr"
-  container_idle_timeout: 300    # 秒，空闲后自动缩容
+  container_idle_timeout: 300    # 秒，空闲后自动缩容；不设 min_containers，避免 T4 空转计费
   max_concurrent_requests: 1     # 单卡串行，避免 VL 兜底时显存争用
-  request_timeout: 300           # 秒，含冷启动与 VL 兜底
-  startup_timeout: 1800          # 秒，首次拉取权重
+  request_timeout: 600           # 秒，覆盖热路径 VL 推理；冷路径（权重+首次 predict）必须在 enter 完成
+  startup_timeout: 1800          # 秒，容器启动时预加载 PP-OCRv6 + VL-1.6 并 warmup
+  preload_fallback: true         # 禁止把 VL 首次加载留在请求路径，否则会撞函数 300s 超时死循环
 
 # --- 模型（与 ai/ocr 配置标识严格一致，禁止静默替换）---
 models:
