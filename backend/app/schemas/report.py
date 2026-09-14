@@ -5,6 +5,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from app.schemas.events import EscalationStatus, TimelineEvent
+from app.schemas.verdict import HumanVerdict
 from app.schemas.video import SamplingMode, VideoMetadata, VideoStatus
 
 
@@ -39,3 +40,6 @@ class ReviewReport(BaseModel):
     modalities: dict[str, ModalityRunStatus] = Field(description="ocr / asr / vlm 运行状态")
     risk_events: list[TimelineEvent] = Field(description="风险事件，按 severity 降序")
     overall: OverallConclusion
+    verdict: Optional[HumanVerdict] = Field(
+        default=None, description="人工复核结论；未提交时为 null"
+    )

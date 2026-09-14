@@ -14,27 +14,9 @@ from app.services.storage_paths import resolve_in_dir
 logger = logging.getLogger(__name__)
 
 
-def modality_result_path(video_id: str, modality: EventModality) -> Path:
-    """模态结果路径：storage/outputs/{video_id}/{modality}.json。"""
-    video_id = normalize_video_id(video_id)
-    return resolve_in_dir(get_settings().outputs_path, video_id, f"{modality}.json")
-
-
-def write_modality_events(
-    video_id: str, modality: EventModality, events: list[TimelineEvent]
-) -> Path:
-    """把模态事件原子写入 outputs/{video_id}/{modality}.json。
-
-    先写同目录临时文件再 os.replace，避免半截 JSON 被下次当作有效结果复用。
-    """
-    video_id = normalize_video_id(video_id)
-    path = modality_result_path(video_id, modality)
+def atomic_write_json(path: Path, payload: object) -> Path:
+    """先写同目录临时文件再 os.replace，避免半截 JSON 被下次当作有效结果复用。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "video_id": video_id,
-        "modality": modality,
-        "events": [event.model_dump(mode="json") for event in events],
-    }
     tmp_path = path.with_name(path.name + ".tmp")
     tmp_path.unlink(missing_ok=True)
     try:
@@ -46,6 +28,26 @@ def write_modality_events(
         tmp_path.unlink(missing_ok=True)
         raise
     return path
+
+
+def modality_result_path(video_id: str, modality: EventModality) -> Path:
+    """模态结果路径：storage/outputs/{video_id}/{modality}.json。"""
+    video_id = normalize_video_id(video_id)
+    return resolve_in_dir(get_settings().outputs_path, video_id, f"{modality}.json")
+
+
+def write_modality_events(
+    video_id: str, modality: EventModality, events: list[TimelineEvent]
+) -> Path:
+    """把模态事件原子写入 outputs/{video_id}/{modality}.json。"""
+    video_id = normalize_video_id(video_id)
+    path = modality_result_path(video_id, modality)
+    payload = {
+        "video_id": video_id,
+        "modality": modality,
+        "events": [event.model_dump(mode="json") for event in events],
+    }
+    return atomic_write_json(path, payload)
 
 
 def try_load_modality_events(

@@ -37,10 +37,12 @@ from app.schemas.events import (
     TimelineEvent,
 )
 from app.schemas.report import ReviewReport
+from app.schemas.verdict import HumanVerdict, VerdictRequest
 from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
 from app.services import asr_pipeline, audio, ocr_pipeline, registry, vlm_pipeline
 from app.services.modality_store import modality_result_path
 from app.services.storage_paths import UnsafePathError, resolve_in_dir
+from app.services.verdict_store import save_verdict
 from app.services.uploads import ALLOWED_VIDEO_EXTENSIONS, UploadNotFoundError, find_uploaded_file
 
 logger = logging.getLogger(__name__)
@@ -422,6 +424,19 @@ def get_video_report(video_id: str) -> ReviewReport:
         logger.error("审核结果损坏 video_id=%s: %s", video_id, exc)
         raise HTTPException(status_code=500, detail="审核结果文件损坏") from exc
     return vlm_pipeline.build_review_report(video_id, events_payload.events)
+
+
+@router.post("/{video_id}/verdict", response_model=HumanVerdict)
+def submit_video_verdict(video_id: str, payload: VerdictRequest) -> HumanVerdict:
+    """提交或覆盖人工复核决策，落盘到 outputs/{video_id}/verdict.json。"""
+    video_id = _validate_video_id(video_id)
+    try:
+        job = registry.get_job(video_id)
+    except registry.JobCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="任务记录文件损坏") from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    return save_verdict(video_id, payload)
 
 
 @router.get("/{video_id}/events", response_model=list[TimelineEvent])

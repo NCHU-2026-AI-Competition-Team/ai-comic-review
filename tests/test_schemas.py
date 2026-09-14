@@ -4,6 +4,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.schemas.events import TimelineEvent
+from app.schemas.verdict import HumanVerdict, VerdictRequest
 from app.schemas.video import (
     FrameInfo,
     FramesInfo,
@@ -126,6 +127,34 @@ def test_timeline_event_invalid_modality() -> None:
             content="x",
             confidence=0.5,
         )
+
+
+def test_verdict_request_accepts_known_decisions() -> None:
+    for decision in ("approve", "reject", "false_positive"):
+        payload = VerdictRequest(decision=decision, note="", event_id=None)  # type: ignore[arg-type]
+        assert payload.decision == decision
+        assert payload.note == ""
+        assert payload.event_id is None
+
+
+def test_verdict_request_rejects_unknown_decision() -> None:
+    with pytest.raises(ValidationError):
+        VerdictRequest(decision="maybe", note="", event_id=None)  # type: ignore[arg-type]
+
+
+def test_human_verdict_created_at_json_is_iso8601() -> None:
+    from datetime import datetime, timezone
+
+    verdict = HumanVerdict(
+        video_id="12345678-1234-1234-1234-1234567890ab",
+        decision="approve",
+        note="",
+        event_id=None,
+        created_at=datetime(2026, 9, 14, 12, 0, 0, tzinfo=timezone.utc),
+    )
+    data = verdict.model_dump(mode="json")
+    parsed = datetime.fromisoformat(data["created_at"].replace("Z", "+00:00"))
+    assert parsed == datetime(2026, 9, 14, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_timeline_event_confidence_out_of_range() -> None:

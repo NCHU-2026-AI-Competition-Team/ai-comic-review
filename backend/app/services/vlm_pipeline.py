@@ -31,6 +31,7 @@ from app.services.modality_store import (
     try_load_modality_events,
     write_modality_events,
 )
+from app.services.verdict_store import try_load_verdict
 from app.services.ocr_pipeline import (
     FramesCorruptedError,
     FramesNotFoundError,
@@ -484,7 +485,7 @@ def build_review_report(video_id: str, vlm_events: list[TimelineEvent]) -> Revie
     needs, status = _status_from_events(vlm_events)
     ocr_text = join_modality_text(ocr_events, 0, 2**31 - 1)
     asr_text = join_modality_text(asr_events, 0, 2**31 - 1)
-    verdict = fuse_overall(
+    fused = fuse_overall(
         _collect_results_from_events(vlm_events),
         needs_escalation=needs,
         escalation_status=status,
@@ -503,5 +504,6 @@ def build_review_report(video_id: str, vlm_events: list[TimelineEvent]) -> Revie
             "vlm": ModalityRunStatus(ran=True, event_count=len(vlm_events)),
         },
         risk_events=_sort_risk_events(vlm_events),
-        overall=_verdict_to_overall(verdict),
+        overall=_verdict_to_overall(fused),
+        verdict=try_load_verdict(video_id),
     )

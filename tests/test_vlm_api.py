@@ -252,6 +252,7 @@ def test_get_report_after_review(client: TestClient, monkeypatch: pytest.MonkeyP
     assert report["modalities"]["ocr"]["ran"] is False
     assert report["overall"]["risk"] is True
     assert report["overall"]["severity"] == "high"
+    assert report["verdict"] is None
     assert report["risk_events"]
     severities = [event["metadata"]["severity"] for event in report["risk_events"]]
     assert severities == sorted(
