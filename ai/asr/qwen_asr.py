@@ -12,25 +12,38 @@ asr_request_timeout_seconds），模型标识不散落在业务代码。
 
 import json
 import logging
+import math
 from pathlib import Path
 from typing import Any
 
 import httpx
 
-from ai.asr.base import AsrProvider, AsrResult, AsrSegment
+from ai.asr.base import (
+    AsrNotConfiguredError,
+    AsrProvider,
+    AsrProviderError,
+    AsrResponseFormatError,
+    AsrResult,
+    AsrSegment,
+    AsrServiceError,
+    AsrTimeoutError,
+)
 from app.core.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 _SEGMENT_KEYS = ("text", "start_ms", "end_ms", "confidence")
 
-
-class AsrServiceError(RuntimeError):
-    """云端 ASR 服务调用失败（网络错误、超时或非 2xx 响应）。"""
-
-
-class AsrResponseFormatError(RuntimeError):
-    """云端 ASR 服务返回结构不符合约定（缺字段或类型不符）。"""
+# 向后兼容：既有测试与调用方可继续从本模块引用抽象异常名
+__all__ = [
+    "AsrNotConfiguredError",
+    "AsrProviderError",
+    "AsrResponseFormatError",
+    "AsrServiceError",
+    "AsrTimeoutError",
+    "QwenAsrProvider",
+    "parse_transcribe_response",
+]
 
 
 def _require_str(value: Any, field: str, context: str) -> str:
@@ -46,7 +59,12 @@ def _require_number(value: Any, field: str, context: str) -> float:
         raise AsrResponseFormatError(
             f"ASR 返回 {context} 的 {field} 字段类型非法：期望数值，实际 {type(value).__name__}"
         )
-    return float(value)
+    number = float(value)
+    if not math.isfinite(number):
+        raise AsrResponseFormatError(
+            f"ASR 返回 {context} 的 {field} 字段类型非法：期望有限数值，实际 {value}"
+        )
+    return number
 
 
 def parse_transcribe_response(data: Any) -> AsrResult:
@@ -99,7 +117,7 @@ class QwenAsrProvider(AsrProvider):
     def __init__(self) -> None:
         settings = get_settings()
         if not settings.modal_asr_url:
-            raise ValueError(
+            raise AsrNotConfiguredError(
                 "未配置 MODAL_ASR_URL：ASR 推理在 Modal 云端，必须先在 .env 配置服务地址"
             )
         self._model = settings.asr_primary_model
@@ -120,16 +138,16 @@ class QwenAsrProvider(AsrProvider):
                     data={"model": self._model},
                 )
         except httpx.TimeoutException as exc:
-            raise AsrServiceError(
+            raise AsrTimeoutError(
                 f"云端 ASR 服务请求超时 audio={audio_path.name}: {exc}"
             ) from exc
         except httpx.HTTPError as exc:
             raise AsrServiceError(
                 f"云端 ASR 服务请求失败 audio={audio_path.name}: {exc}"
             ) from exc
-        if response.status_code != 200:
+        if not response.is_success:
             raise AsrServiceError(
-                f"云端 ASR 服务返回非 200 状态码={response.status_code} "
+                f"云端 ASR 服务返回非 2xx 状态码={response.status_code} "
                 f"audio={audio_path.name} 响应={response.text[:500]}"
             )
         try:

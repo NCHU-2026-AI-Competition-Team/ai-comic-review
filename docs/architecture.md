@@ -67,9 +67,10 @@ backend/app/
 ├── services/          # 业务层：不感知 HTTP
 │   ├── video/         #   视频处理包：__init__.py（ffprobe 元数据、固定帧率抽帧、frames.json 落盘、流程编排）
 │   │   └── scene.py   #   镜头切换检测（scene_change 采样模式）
-│   ├── audio.py       #   音频提取：ffprobe 音轨探测 + ffmpeg 提取 16kHz 单声道 PCM wav
+│   ├── audio.py       #   音频提取：ffprobe 音轨探测 + ffmpeg 提取 16kHz 单声道 PCM wav（临时文件+校验+原子替换）
 │   ├── ocr_pipeline.py#   OCR 编排：读 frames.json → 逐帧识别 → TimelineEvent → ocr.json
-│   ├── asr_pipeline.py#   ASR 编排：确保 audio.wav → 云端识别 → TimelineEvent → asr.json
+│   ├── asr_pipeline.py#   ASR 编排：确保 audio.wav → 云端识别 → TimelineEvent → asr.json（默认幂等复用）
+│   ├── modality_store.py # 模态事件原子落盘与损坏恢复（OCR/ASR/后续 VLM 共用）
 │   └── registry.py    #   任务记录（VideoJob）的文件注册表，接口与存储解耦，后续可替换为 PostgreSQL
 ├── schemas/           # 数据模型（Pydantic）
 │   ├── video.py       #   VideoJob / VideoMetadata / FramesInfo / FrameInfo / SamplingInfo / VideoUploadResponse
@@ -83,8 +84,8 @@ ai/                    # 多模态能力包（仓库根，经 sys.path/pythonpat
 │   ├── paddleocr.py   #   PaddleOcrProvider：PP-OCRv6 实现，惰性单例，模型/语言/设备走配置
 │   └── factory.py     #   默认 Provider 入口（按配置分派，业务层不 import 具体实现）
 └── asr/
-    ├── base.py        #   AsrProvider 抽象基类 + AsrSegment/AsrResult，业务层只依赖此接口
-    ├── qwen_asr.py    #   QwenAsrProvider：Modal 云端 Qwen3-ASR 的 HTTPS 客户端（httpx），端点/模型/超时走配置
+    ├── base.py        #   AsrProvider 抽象 + AsrSegment/AsrResult + 抽象异常（AsrProviderError 等）
+    ├── qwen_asr.py    #   QwenAsrProvider：Modal 云端 Qwen3-ASR 的 HTTPS 客户端（httpx），只抛抽象异常
     └── factory.py     #   默认 Provider 入口（按配置分派，业务层不 import 具体实现）
 ```
 
@@ -153,35 +154,39 @@ OCR 引擎依赖（paddleocr/paddlepaddle）只在 `ai/ocr/paddleocr.py` 内延�
 拓扑约束：ASR 推理全部在 Modal 云端（Qwen3-ASR-1.7B），本地只跑业务管线——提取音频并经 HTTPS 调用，不加载任何 ASR 模型权重。
 
 ```
-POST /api/videos/{video_id}/asr
+POST /api/videos/{video_id}/asr?force=false
   │
-  ├─ 1. video_id 校验；任务记录不存在 404
+  ├─ 1. video_id 经共享 normalize_video_id（UUID）校验；任务记录不存在 404
   ├─ 2. services/asr_pipeline.run_asr 同步执行（本阶段不引入任务队列）：
-  │      a. services/audio.ensure_audio：audio.wav 已存在则复用，
-  │         否则自动提取——ffprobe 探测音轨（无音轨返回 409 提示无法识别，
-  │         上传文件缺失返回 409 提示重新上传），
-  │         ffmpeg -vn -ac 1 -ar 16000 -f wav 提取单声道 16kHz PCM
-  │         到 storage/audio/{video_id}/audio.wav
-  │      b. 调用 ai.asr 的 AsrProvider.transcribe（惰性单例）：
+  │      a. 默认复用已有且完好的 asr.json（返回 reused=true）；
+  │         损坏的 asr.json 删除后重跑；force=true 才忽略已有结果
+  │      b. services/audio.ensure_audio：有效 audio.wav 复用，缺失或损坏
+  │         （空文件、wave 无法识别、非 16kHz 单声道）则重新提取——
+  │         按允许扩展名枚举上传文件（无音轨 409，上传缺失 409），
+  │         ffmpeg 写入临时文件，校验通过后原子替换 audio.wav；
+  │         超时删除半成品并抛 AudioExtractTimeoutError（API 映射 504）
+  │      c. 调用 ai.asr 的 AsrProvider.transcribe（惰性单例）：
   │         QwenAsrProvider 以 multipart 上传 wav 到
   │         POST {MODAL_ASR_URL}/transcribe（表单字段 model 携带模型标识），
   │         响应 {"segments": [{text,start_ms,end_ms,confidence}], language}
-  │         经严格解析（缺字段/类型非法/时间区间非法均明确抛错）；
-  │         超时、网络错误与非 200 响应抛 AsrServiceError
-  │      c. 每个分段聚合为 TimelineEvent：modality='asr'，
-  │         start_ms/end_ms 取分段区间（与全模态统一 int 毫秒时间轴一致），
+  │         经严格解析（缺字段/类型非法/非有限数值/时间区间非法均抛
+  │         AsrResponseFormatError）；超时抛 AsrTimeoutError（504），
+  │         网络错误与非 2xx 抛 AsrServiceError（502），
+  │         未配置端点抛 AsrNotConfiguredError（503）。
+  │         异常定义在 ai/asr/base.py，API 不 import 具体实现
+  │      d. 每个分段聚合为 TimelineEvent：modality='asr'，
+  │         按 (start_ms, end_ms) 稳定排序；start_ms/end_ms 取分段区间，
   │         content 为分段文本，confidence 截断到 [0, 1]，
-  │         语言与分段序号保留在 metadata；
-  │         空文本分段不产事件
-  │      d. 结果落盘 storage/outputs/{video_id}/asr.json
-  │         （{video_id, modality, events: [...]}）
-  └─ 3. 返回 {video_id, modality: 'asr', event_count}
+  │         语言与原始分段序号保留在 metadata；空文本分段不产事件
+  │      e. 结果经 write_modality_events 原子落盘
+  │         storage/outputs/{video_id}/asr.json
+  └─ 3. 返回 {video_id, modality: 'asr', event_count, reused}
 
 GET /api/videos/{video_id}/events?modality=asr
   └─ 复用通用事件端点，读取 outputs/{video_id}/asr.json（无需改动）
 ```
 
-音频提取的采样率与声道数由 ASR 服务契约固定（16kHz 单声道 PCM wav），不走配置；云端端点、模型名与请求超时走配置（`modal_asr_url` / `asr_primary_model` / `asr_request_timeout_seconds`），未配置 `MODAL_ASR_URL` 时 Provider 初始化明确报错。时间戳对齐模型（Qwen3-ForcedAligner-0.6B）由云端服务内部使用，本地仅以 `asr_aligner_model` 记录标识。
+音频提取的采样率与声道数由 ASR 服务契约固定（16kHz 单声道 PCM wav），不走配置；云端端点、模型名与请求超时走配置（`modal_asr_url` / `asr_primary_model` / `asr_request_timeout_seconds`）。`MODAL_ASR_URL` 未配置（空）时 Provider 初始化抛 `AsrNotConfiguredError`；配置层要求生产端点为 https，禁止 URL 凭据，仅 `http://127.0.0.1` / `http://localhost` 作为本地测试 stub。时间戳对齐模型（Qwen3-ForcedAligner-0.6B）由云端服务内部使用，本地仅以 `asr_aligner_model` 记录标识。OCR 与 ASR 的 `{modality}.json` 均经 `write_modality_events` 原子写入。
 
 ## 模型选型与 Provider 抽象
 
@@ -251,7 +256,7 @@ storage/
 | `ocr_fallback_model` | `OCR_FALLBACK_MODEL` | `PaddleOCR-VL-1.6` | 备用疑难 OCR 模型标识，仅记录不加载 |
 | `ocr_lang` | `OCR_LANG` | `ch` | OCR 识别语言 |
 | `ocr_use_gpu` | `OCR_USE_GPU` | `false` | OCR 是否使用 GPU，默认 CPU |
-| `modal_asr_url` | `MODAL_ASR_URL` | 空 | Modal 云端 ASR 服务地址（不含路径），未配置时 ASR 不可用 |
+| `modal_asr_url` | `MODAL_ASR_URL` | 空 | Modal 云端 ASR 服务 HTTPS 地址（不含路径），未配置时 ASR 不可用；禁止凭据，本地 stub 允许 http://127.0.0.1 / http://localhost |
 | `asr_primary_model` | `ASR_PRIMARY_MODEL` | `Qwen3-ASR-1.7B` | 主 ASR 模型标识 |
 | `asr_aligner_model` | `ASR_ALIGNER_MODEL` | `Qwen3-ForcedAligner-0.6B` | 时间戳对齐模型标识，仅记录不加载，云端服务内部使用 |
 | `asr_request_timeout_seconds` | `ASR_REQUEST_TIMEOUT_SECONDS` | `120` | 云端 ASR 服务请求超时（秒），必须大于 0 |

@@ -31,8 +31,9 @@ class ModalityEventsFile(BaseModel):
 
 
 class ModalityRunResponse(BaseModel):
-    """单模态分析（如 OCR）执行接口的响应模型。"""
+    """单模态分析（如 OCR/ASR）执行接口的响应模型。"""
 
     video_id: str
     modality: EventModality
     event_count: int = Field(ge=0, description="本次产出的事件数量")
+    reused: bool = Field(default=False, description="是否复用了已有落盘结果")

@@ -106,7 +106,12 @@ def test_run_ocr_and_get_events_roundtrip(
     response = client.post(f"/api/videos/{VALID_VIDEO_ID}/ocr")
     assert response.status_code == 200, response.text
     payload = response.json()
-    assert payload == {"video_id": VALID_VIDEO_ID, "modality": "ocr", "event_count": 1}
+    assert payload == {
+        "video_id": VALID_VIDEO_ID,
+        "modality": "ocr",
+        "event_count": 1,
+        "reused": False,
+    }
 
     # ocr.json 已落盘
     result_file = get_settings().outputs_path / VALID_VIDEO_ID / "ocr.json"

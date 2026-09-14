@@ -18,8 +18,11 @@ from pathlib import Path
 from typing import Optional
 
 from app.core.config import ROOT_DIR, get_settings
+from app.core.ids import normalize_video_id
 from app.schemas.events import TimelineEvent
 from app.schemas.video import FrameInfo, FramesInfo
+from app.services.modality_store import modality_result_path, write_modality_events
+from app.services.storage_paths import resolve_in_dir
 from app.services.video import FRAMES_JSON
 
 # uvicorn 从 backend/ 启动时仓库根目录不在 sys.path，而 ai 包位于仓库根；
@@ -45,7 +48,8 @@ class FramesCorruptedError(RuntimeError):
 
 def load_frames_info(video_id: str) -> FramesInfo:
     """读取帧清单：不存在抛 FramesNotFoundError，损坏抛 FramesCorruptedError。"""
-    frames_file = get_settings().frames_path / video_id / FRAMES_JSON
+    video_id = normalize_video_id(video_id)
+    frames_file = resolve_in_dir(get_settings().frames_path, video_id, FRAMES_JSON)
     if not frames_file.is_file():
         raise FramesNotFoundError(f"视频尚未完成抽帧 video_id={video_id}")
     try:
@@ -106,7 +110,7 @@ def frame_lines_to_event(
 
 def ocr_result_path(video_id: str) -> Path:
     """OCR 结果文件路径：storage/outputs/{video_id}/ocr.json。"""
-    return get_settings().outputs_path / video_id / OCR_RESULT_FILENAME
+    return modality_result_path(video_id, "ocr")
 
 
 def run_ocr(video_id: str, provider: Optional[OcrProvider] = None) -> list[TimelineEvent]:
@@ -114,10 +118,11 @@ def run_ocr(video_id: str, provider: Optional[OcrProvider] = None) -> list[Timel
 
     provider 可注入以便测试替换；默认使用进程级惰性单例（工厂入口）。
     """
+    video_id = normalize_video_id(video_id)
     frames_info = load_frames_info(video_id)
     if provider is None:
         provider = get_default_provider()
-    frames_dir = get_settings().frames_path / video_id
+    frames_dir = resolve_in_dir(get_settings().frames_path, video_id)
 
     events = []
     failed = 0
@@ -137,16 +142,7 @@ def run_ocr(video_id: str, provider: Optional[OcrProvider] = None) -> list[Timel
         if event is not None:
             events.append(event)
 
-    result_file = ocr_result_path(video_id)
-    result_file.parent.mkdir(parents=True, exist_ok=True)
-    payload = {
-        "video_id": video_id,
-        "modality": "ocr",
-        "events": [event.model_dump(mode="json") for event in events],
-    }
-    result_file.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    write_modality_events(video_id, "ocr", events)
     logger.info(
         "OCR 完成 video_id=%s 帧数=%d 事件数=%d 失败帧数=%d",
         video_id, len(frames_info.frames), len(events), failed,

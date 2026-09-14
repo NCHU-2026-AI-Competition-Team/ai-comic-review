@@ -2,13 +2,26 @@
 
 import json
 import logging
+import sys
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 
-from app.core.config import get_settings
+from app.core.config import ROOT_DIR, get_settings
+from app.core.ids import InvalidVideoIdError, normalize_video_id
+
+# uvicorn 从 backend/ 启动时仓库根不在 sys.path；抽象异常定义在 ai.asr.base
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from ai.asr.base import (  # noqa: E402
+    AsrNotConfiguredError,
+    AsrResponseFormatError,
+    AsrServiceError,
+    AsrTimeoutError,
+)
 from app.schemas.events import (
     EventModality,
     ModalityEventsFile,
@@ -17,12 +30,15 @@ from app.schemas.events import (
 )
 from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
 from app.services import asr_pipeline, audio, ocr_pipeline, registry
+from app.services.modality_store import modality_result_path
+from app.services.storage_paths import UnsafePathError, resolve_in_dir
+from app.services.uploads import ALLOWED_VIDEO_EXTENSIONS
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 
-ALLOWED_EXTENSIONS = {".mp4", ".mov", ".mkv"}
+ALLOWED_EXTENSIONS = set(ALLOWED_VIDEO_EXTENSIONS)
 ALLOWED_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
 ALLOWED_SAMPLING_MODES = {"fixed_fps", "scene"}
 
@@ -30,8 +46,8 @@ ALLOWED_SAMPLING_MODES = {"fixed_fps", "scene"}
 def _validate_video_id(video_id: str) -> str:
     """校验 video_id 为合法 UUID，防止路径穿越；非法格式返回 400。"""
     try:
-        return str(uuid.UUID(video_id))
-    except ValueError:
+        return normalize_video_id(video_id)
+    except InvalidVideoIdError:
         raise HTTPException(status_code=400, detail="video_id 格式非法") from None
 
 
@@ -94,7 +110,7 @@ def upload_video(file: UploadFile, sampling: str = Form("fixed_fps")) -> VideoUp
 
     settings = get_settings()
     video_id = str(uuid.uuid4())
-    dest = settings.uploads_path / f"{video_id}{ext}"
+    dest = resolve_in_dir(settings.uploads_path, f"{video_id}{ext}")
     settings.uploads_path.mkdir(parents=True, exist_ok=True)
     _save_upload(file, dest, max_bytes=settings.max_upload_size_mb * 1024 * 1024)
 
@@ -121,7 +137,7 @@ def upload_video(file: UploadFile, sampling: str = Form("fixed_fps")) -> VideoUp
 @router.get("/{video_id}", response_model=VideoJob)
 def get_video(video_id: str) -> VideoJob:
     """查询视频任务的当前状态与已有结果。"""
-    _validate_video_id(video_id)
+    video_id = _validate_video_id(video_id)
     try:
         job = registry.get_job(video_id)
     except registry.JobCorruptedError as exc:
@@ -134,8 +150,8 @@ def get_video(video_id: str) -> VideoJob:
 @router.get("/{video_id}/frames", response_model=FramesInfo)
 def get_video_frames(video_id: str) -> FramesInfo:
     """读取抽帧结果，尚未生成时返回 404。"""
-    _validate_video_id(video_id)
-    frames_file = get_settings().frames_path / video_id / "frames.json"
+    video_id = _validate_video_id(video_id)
+    frames_file = resolve_in_dir(get_settings().frames_path, video_id, "frames.json")
     if not frames_file.is_file():
         raise HTTPException(status_code=404, detail="抽帧结果尚未生成")
     try:
@@ -149,10 +165,13 @@ def get_video_frames(video_id: str) -> FramesInfo:
 @router.get("/{video_id}/frames/{filename}")
 def get_frame_image(video_id: str, filename: str) -> FileResponse:
     """按帧文件名访问帧图片。"""
-    _validate_video_id(video_id)
+    video_id = _validate_video_id(video_id)
     if Path(filename).name != filename or Path(filename).suffix.lower() not in ALLOWED_FRAME_SUFFIXES:
         raise HTTPException(status_code=404, detail="帧图片不存在")
-    frame_file = get_settings().frames_path / video_id / filename
+    try:
+        frame_file = resolve_in_dir(get_settings().frames_path, video_id, filename)
+    except UnsafePathError:
+        raise HTTPException(status_code=404, detail="帧图片不存在") from None
     if not frame_file.is_file():
         raise HTTPException(status_code=404, detail="帧图片不存在")
     return FileResponse(frame_file)
@@ -161,7 +180,7 @@ def get_frame_image(video_id: str, filename: str) -> FileResponse:
 @router.post("/{video_id}/ocr", response_model=ModalityRunResponse)
 def run_video_ocr(video_id: str) -> ModalityRunResponse:
     """对已完成抽帧的视频同步执行 OCR，产出 ocr 模态时间线事件。"""
-    _validate_video_id(video_id)
+    video_id = _validate_video_id(video_id)
     try:
         job = registry.get_job(video_id)
     except registry.JobCorruptedError as exc:
@@ -178,9 +197,15 @@ def run_video_ocr(video_id: str) -> ModalityRunResponse:
 
 
 @router.post("/{video_id}/asr", response_model=ModalityRunResponse)
-def run_video_asr(video_id: str) -> ModalityRunResponse:
-    """对视频同步执行 ASR（自动提取音频并调用云端识别），产出 asr 模态时间线事件。"""
-    _validate_video_id(video_id)
+def run_video_asr(
+    video_id: str,
+    force: bool = Query(False, description="为 true 时忽略已有 asr.json 强制重跑"),
+) -> ModalityRunResponse:
+    """对视频同步执行 ASR（自动提取音频并调用云端识别），产出 asr 模态时间线事件。
+
+    默认复用已有 asr.json 并标注 reused=true；force=true 才重新识别。
+    """
+    video_id = _validate_video_id(video_id)
     try:
         job = registry.get_job(video_id)
     except registry.JobCorruptedError as exc:
@@ -188,12 +213,27 @@ def run_video_asr(video_id: str) -> ModalityRunResponse:
     if job is None:
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
-        events = asr_pipeline.run_asr(video_id)
+        outcome = asr_pipeline.run_asr(video_id, force=force)
     except audio.UploadNotFoundError as exc:
         raise HTTPException(status_code=409, detail="找不到原始视频文件，请重新上传") from exc
     except audio.NoAudioTrackError as exc:
         raise HTTPException(status_code=409, detail="视频不含音轨，无法执行语音识别") from exc
-    return ModalityRunResponse(video_id=video_id, modality="asr", event_count=len(events))
+    except audio.AudioExtractTimeoutError as exc:
+        raise HTTPException(status_code=504, detail="音频提取超时") from exc
+    except AsrTimeoutError as exc:
+        raise HTTPException(status_code=504, detail="云端语音识别超时") from exc
+    except AsrNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail="未配置云端 ASR 服务端点") from exc
+    except (AsrServiceError, AsrResponseFormatError) as exc:
+        raise HTTPException(status_code=502, detail="云端语音识别服务异常") from exc
+    except audio.InvalidAudioError as exc:
+        raise HTTPException(status_code=500, detail="音频文件损坏或格式不符") from exc
+    return ModalityRunResponse(
+        video_id=video_id,
+        modality="asr",
+        event_count=len(outcome.events),
+        reused=outcome.reused,
+    )
 
 
 @router.get("/{video_id}/events", response_model=list[TimelineEvent])
@@ -202,8 +242,8 @@ def get_video_events(
     modality: EventModality = Query("ocr", description="事件来源模态"),
 ) -> list[TimelineEvent]:
     """读取已生成的模态事件列表，尚未生成时返回 404。"""
-    _validate_video_id(video_id)
-    events_file = get_settings().outputs_path / video_id / f"{modality}.json"
+    video_id = _validate_video_id(video_id)
+    events_file = modality_result_path(video_id, modality)
     if not events_file.is_file():
         raise HTTPException(status_code=404, detail="事件尚未生成")
     try:

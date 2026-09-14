@@ -172,12 +172,15 @@ def extract_frames(video_id: str, video_path: Path, fps: float) -> FramesInfo:
 
 
 def _find_uploaded_file(video_id: str) -> Path:
-    """定位上传的原始视频文件。"""
-    uploads = get_settings().uploads_path
-    for candidate in sorted(uploads.glob(f"{video_id}.*")):
-        if candidate.is_file():
-            return candidate
-    raise RuntimeError(f"找不到 video_id={video_id} 对应的上传文件")
+    """定位上传的原始视频文件（按允许扩展名枚举，非法 id 与路径越界在下层拒绝）。"""
+    from app.core.ids import normalize_video_id
+    from app.services.uploads import UploadNotFoundError, find_uploaded_file
+
+    video_id = normalize_video_id(video_id)
+    try:
+        return find_uploaded_file(video_id)
+    except UploadNotFoundError as exc:
+        raise RuntimeError(f"找不到 video_id={video_id} 对应的上传文件") from exc
 
 
 def process_video(video_id: str, sampling: SamplingMode = "fixed_fps") -> None:

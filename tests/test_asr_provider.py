@@ -10,10 +10,11 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
+import httpx
 import pytest
 
 from ai.asr import factory
-from ai.asr.base import AsrResult, AsrSegment
+from ai.asr.base import AsrNotConfiguredError, AsrResult, AsrSegment, AsrTimeoutError
 from ai.asr.qwen_asr import (
     AsrResponseFormatError,
     AsrServiceError,
@@ -148,8 +149,29 @@ def test_provider_requires_modal_url(monkeypatch: pytest.MonkeyPatch) -> None:
     """未配置 MODAL_ASR_URL 时初始化明确报错。"""
     monkeypatch.setenv("MODAL_ASR_URL", "")
     get_settings.cache_clear()
-    with pytest.raises(ValueError, match="MODAL_ASR_URL"):
+    with pytest.raises(AsrNotConfiguredError, match="MODAL_ASR_URL"):
         QwenAsrProvider()
+
+
+def test_transcribe_timeout_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """httpx 超时应映射为 AsrTimeoutError，而不是泛化的网络错误。"""
+    provider = _make_provider("http://127.0.0.1:9", monkeypatch)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated timeout")
+
+    provider._client.close()
+    provider._client = httpx.Client(
+        base_url="http://127.0.0.1:9",
+        timeout=1.0,
+        transport=httpx.MockTransport(handler),
+        trust_env=False,
+    )
+    with pytest.raises(AsrTimeoutError, match="超时"):
+        provider.transcribe(_make_wav(tmp_path))
+    provider._client.close()
 
 
 # ---- parse_transcribe_response 严格解析 ----
@@ -186,6 +208,11 @@ def test_parse_response_empty_segments_allowed() -> None:
         (_payload(segments=[{"text": "a", "start_ms": 0, "end_ms": 1}]), "缺少字段"),
         (_payload(segments=[{"text": 1, "start_ms": 0, "end_ms": 1, "confidence": 0.5}]), "text 字段类型非法"),
         (_payload(segments=[{"text": "a", "start_ms": "0", "end_ms": 1, "confidence": 0.5}]), "start_ms 字段类型非法"),
+        (_payload(segments=[{"text": "a", "start_ms": True, "end_ms": 1, "confidence": 0.5}]), "start_ms 字段类型非法"),
+        (_payload(segments=[{"text": "a", "start_ms": float("nan"), "end_ms": 1, "confidence": 0.5}]), "有限数值"),
+        (_payload(segments=[{"text": "a", "start_ms": float("inf"), "end_ms": 1, "confidence": 0.5}]), "有限数值"),
+        (_payload(segments=[{"text": "a", "start_ms": 0, "end_ms": float("-inf"), "confidence": 0.5}]), "有限数值"),
+        (_payload(segments=[{"text": "a", "start_ms": 0, "end_ms": 1, "confidence": float("nan")}]), "有限数值"),
         (_payload(segments=[{"text": "a", "start_ms": -1, "end_ms": 1, "confidence": 0.5}]), "时间区间非法"),
         (_payload(segments=[{"text": "a", "start_ms": 5, "end_ms": 1, "confidence": 0.5}]), "时间区间非法"),
         (_payload(language=123), "language 字段类型非法"),
@@ -197,6 +224,16 @@ def test_parse_response_invalid(payload: Any, match: str) -> None:
 
 
 # ---- 工厂分派 ----
+
+
+def test_qwen_asr_reexports_abstract_errors() -> None:
+    """具体实现模块向后引用抽象层异常，名称保持可 import。"""
+    from ai.asr import base, qwen_asr
+
+    assert qwen_asr.AsrServiceError is base.AsrServiceError
+    assert qwen_asr.AsrResponseFormatError is base.AsrResponseFormatError
+    assert qwen_asr.AsrTimeoutError is base.AsrTimeoutError
+    assert qwen_asr.AsrNotConfiguredError is base.AsrNotConfiguredError
 
 
 def test_factory_returns_qwen_provider(monkeypatch: pytest.MonkeyPatch) -> None:

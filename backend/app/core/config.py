@@ -2,9 +2,12 @@
 
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_LOCAL_HTTP_HOSTS = {"127.0.0.1", "localhost"}
 
 # 仓库根目录（backend/app/core/config.py 向上四级）
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -34,6 +37,28 @@ class Settings(BaseSettings):
     asr_primary_model: str = Field(default="Qwen3-ASR-1.7B", description="主 ASR 模型标识")
     asr_aligner_model: str = Field(default="Qwen3-ForcedAligner-0.6B", description="时间戳对齐模型标识，仅记录不加载，云端服务内部使用")
     asr_request_timeout_seconds: float = Field(default=120.0, gt=0, description="云端 ASR 服务请求超时（秒）")
+
+    @field_validator("modal_asr_url")
+    @classmethod
+    def _validate_modal_asr_url(cls, value: str) -> str:
+        """空值表示未配置；生产端点必须 https，仅允许本地 http stub，禁止 URL 凭据。"""
+        url = (value or "").strip()
+        if not url:
+            return ""
+        parsed = urlparse(url)
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("MODAL_ASR_URL 禁止携带用户名或密码")
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower()
+        if not scheme or not parsed.netloc:
+            raise ValueError("MODAL_ASR_URL 必须是含 scheme 的绝对 URL")
+        if scheme == "https":
+            return url
+        if scheme == "http" and host in _LOCAL_HTTP_HOSTS:
+            return url
+        raise ValueError(
+            "MODAL_ASR_URL 必须使用 https（本地测试 stub 允许 http://127.0.0.1 或 http://localhost）"
+        )
 
     @property
     def storage_path(self) -> Path:

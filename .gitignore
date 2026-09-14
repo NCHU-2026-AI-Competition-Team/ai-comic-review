@@ -7,9 +7,11 @@
 storage/uploads/*
 storage/frames/*
 storage/outputs/*
+storage/audio/*
 !storage/uploads/.gitkeep
 !storage/frames/.gitkeep
 !storage/outputs/.gitkeep
+!storage/audio/.gitkeep
 /uploads/
 /outputs/
 *.mp4

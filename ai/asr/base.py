@@ -10,6 +10,26 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+class AsrProviderError(RuntimeError):
+    """ASR Provider 失败的抽象基类；业务层只捕获本层异常，不依赖具体实现模块。"""
+
+
+class AsrServiceError(AsrProviderError):
+    """云端 ASR 服务调用失败（网络错误、超时或非 2xx 响应）。"""
+
+
+class AsrTimeoutError(AsrServiceError):
+    """云端 ASR 服务请求超时。"""
+
+
+class AsrResponseFormatError(AsrProviderError):
+    """云端 ASR 服务返回结构不符合约定（缺字段、类型不符或非有限数值）。"""
+
+
+class AsrNotConfiguredError(AsrProviderError):
+    """未配置 ASR 服务端点，当前无法调用云端识别。"""
+
+
 @dataclass
 class AsrSegment:
     """单段语音识别结果：文本、起止时间（int 毫秒）与置信度（0~1）。"""

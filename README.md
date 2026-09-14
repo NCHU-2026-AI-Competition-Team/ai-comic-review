@@ -75,7 +75,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 - `GET /api/videos/{video_id}/frames` — 帧清单
 - `GET /api/videos/{video_id}/frames/{filename}` — 帧图片
 - `POST /api/videos/{video_id}/ocr` — 对已完成抽帧的视频同步执行 OCR（未抽帧返回 409）
-- `POST /api/videos/{video_id}/asr` — 对视频同步执行 ASR（自动提取音频并调用云端识别；原始文件缺失或无音轨返回 409）
+- `POST /api/videos/{video_id}/asr` — 对视频同步执行 ASR（自动提取音频并调用云端识别；默认复用已有 `asr.json` 并标注 `reused`；`?force=true` 才重跑。原始文件缺失或无音轨返回 409；云端超时 504、服务异常 502、未配置端点 503）
 - `GET /api/videos/{video_id}/events?modality=ocr|asr` — 查询已生成的模态时间线事件
 
 ### 前端（本地）
@@ -134,7 +134,7 @@ OCR 说明：引擎为 PaddleOCR 官方包（`paddleocr` + CPU 版 `paddlepaddle
 | `OCR_FALLBACK_MODEL` | `PaddleOCR-VL-1.6` | 备用疑难 OCR 模型标识（仅记录不加载，后续切片接入） |
 | `OCR_LANG` | `ch` | OCR 识别语言 |
 | `OCR_USE_GPU` | `false` | OCR 是否使用 GPU（默认 CPU） |
-| `MODAL_ASR_URL` | 空 | Modal 云端 ASR 服务地址（不含路径），未配置时 ASR 不可用 |
+| `MODAL_ASR_URL` | 空 | Modal 云端 ASR 服务 HTTPS 地址（不含路径）。未配置（空）时 ASR 不可用，必须替换为真实 Modal 端点；禁止 URL 凭据，本地测试 stub 允许 `http://127.0.0.1` / `http://localhost` |
 | `ASR_PRIMARY_MODEL` | `Qwen3-ASR-1.7B` | 主 ASR 模型标识 |
 | `ASR_ALIGNER_MODEL` | `Qwen3-ForcedAligner-0.6B` | 时间戳对齐模型标识（仅记录，云端服务内部使用） |
 | `ASR_REQUEST_TIMEOUT_SECONDS` | `120` | 云端 ASR 服务请求超时（秒） |
