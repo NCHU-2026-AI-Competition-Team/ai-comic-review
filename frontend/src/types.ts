@@ -71,3 +71,41 @@ export interface ModalityRunResponse {
   event_count: number
   reused?: boolean
 }
+
+export interface RiskEvent {
+  start_ms: number
+  end_ms: number
+  category: string
+  severity: string
+  confidence: number
+  evidence: string
+  reason: string
+  suggestion: string
+  needs_escalation: boolean
+}
+
+export interface RiskReportOverall {
+  risk: string
+  category: string
+  severity: string
+  confidence: number
+  suggestion: string
+  reason: string
+  needs_escalation: boolean
+  escalation_status: 'not_needed' | 'pending_review' | string
+}
+
+export interface RiskReport {
+  video_id: string
+  filename: string
+  status: string
+  sampling: string
+  metadata: VideoMetadata
+  modalities: {
+    ocr: { ran: boolean; event_count: number }
+    asr: { ran: boolean; event_count: number }
+    vlm: { ran: boolean; event_count: number }
+  }
+  risk_events: RiskEvent[]
+  overall: RiskReportOverall
+}

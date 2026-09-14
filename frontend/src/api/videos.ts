@@ -2,6 +2,7 @@ import type {
   EventModality,
   FramesInfo,
   ModalityRunResponse,
+  RiskReport,
   SamplingMode,
   TimelineEvent,
   VideoJob,
@@ -105,4 +106,13 @@ export function frameImageUrl(videoId: string, frame: { frame_id: string; path: 
   // 兼容旧版 frames.json（path 不带 /api 前缀）：按文件名拼接完整路由
   const filename = frame.path.split('/').pop() ?? `${frame.frame_id}.jpg`
   return `${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/frames/${encodeURIComponent(filename)}`
+}
+
+/** 读取视频审核的结构化报告 */
+export async function getReport(videoId: string): Promise<RiskReport> {
+  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/report`)
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+  return (await res.json()) as RiskReport
 }

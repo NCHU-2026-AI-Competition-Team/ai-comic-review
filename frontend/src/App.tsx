@@ -232,7 +232,7 @@ export default function App() {
                 />
               </div>
               <div className="workbench-right">
-                <RiskReportPanel vlmEvents={events.vlm} />
+                <RiskReportPanel videoId={job.video_id} vlmEvents={events.vlm} />
                 <div className="modality-actions">
                   <OcrPanel videoId={job.video_id} onEvents={(evs) => setEvents((prev) => ({ ...prev, ocr: evs }))} />
                   <AsrPanel videoId={job.video_id} onEvents={(evs) => setEvents((prev) => ({ ...prev, asr: evs }))} />
