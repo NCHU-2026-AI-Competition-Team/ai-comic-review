@@ -16,7 +16,7 @@ from app.schemas.events import (
     TimelineEvent,
 )
 from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
-from app.services import ocr_pipeline, registry
+from app.services import asr_pipeline, audio, ocr_pipeline, registry
 
 logger = logging.getLogger(__name__)
 
@@ -175,6 +175,25 @@ def run_video_ocr(video_id: str) -> ModalityRunResponse:
     except ocr_pipeline.FramesCorruptedError as exc:
         raise HTTPException(status_code=500, detail="帧清单文件损坏") from exc
     return ModalityRunResponse(video_id=video_id, modality="ocr", event_count=len(events))
+
+
+@router.post("/{video_id}/asr", response_model=ModalityRunResponse)
+def run_video_asr(video_id: str) -> ModalityRunResponse:
+    """对视频同步执行 ASR（自动提取音频并调用云端识别），产出 asr 模态时间线事件。"""
+    _validate_video_id(video_id)
+    try:
+        job = registry.get_job(video_id)
+    except registry.JobCorruptedError as exc:
+        raise HTTPException(status_code=500, detail="任务记录文件损坏") from exc
+    if job is None:
+        raise HTTPException(status_code=404, detail="视频不存在")
+    try:
+        events = asr_pipeline.run_asr(video_id)
+    except audio.UploadNotFoundError as exc:
+        raise HTTPException(status_code=409, detail="找不到原始视频文件，请重新上传") from exc
+    except audio.NoAudioTrackError as exc:
+        raise HTTPException(status_code=409, detail="视频不含音轨，无法执行语音识别") from exc
+    return ModalityRunResponse(video_id=video_id, modality="asr", event_count=len(events))
 
 
 @router.get("/{video_id}/events", response_model=list[TimelineEvent])
