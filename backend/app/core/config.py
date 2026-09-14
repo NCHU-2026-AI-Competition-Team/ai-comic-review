@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     ocr_fallback_model: str = Field(default="PaddleOCR-VL-1.6", description="备用疑难 OCR 模型标识，仅记录不加载，后续切片接入")
     ocr_lang: str = Field(default="ch", description="OCR 识别语言")
     ocr_use_gpu: bool = Field(default=False, description="OCR 是否使用 GPU，默认 CPU")
+    # ASR 配置（ai/asr 使用）：ASR 推理全部在 Modal 云端，本地仅提取音频并 HTTPS 调用
+    modal_asr_url: str = Field(default="", description="Modal 云端 ASR 服务地址（不含路径），未配置时 ASR 不可用")
+    asr_primary_model: str = Field(default="Qwen3-ASR-1.7B", description="主 ASR 模型标识")
+    asr_aligner_model: str = Field(default="Qwen3-ForcedAligner-0.6B", description="时间戳对齐模型标识，仅记录不加载，云端服务内部使用")
+    asr_request_timeout_seconds: float = Field(default=120.0, gt=0, description="云端 ASR 服务请求超时（秒）")
 
     @property
     def storage_path(self) -> Path:
@@ -50,9 +55,19 @@ class Settings(BaseSettings):
     def outputs_path(self) -> Path:
         return self.storage_path / "outputs"
 
+    @property
+    def audio_path(self) -> Path:
+        return self.storage_path / "audio"
+
     def ensure_storage_dirs(self) -> None:
         """启动时确保存储目录结构存在。"""
-        for path in (self.storage_path, self.uploads_path, self.frames_path, self.outputs_path):
+        for path in (
+            self.storage_path,
+            self.uploads_path,
+            self.frames_path,
+            self.outputs_path,
+            self.audio_path,
+        ):
             path.mkdir(parents=True, exist_ok=True)
 
 
