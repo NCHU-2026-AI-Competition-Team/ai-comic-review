@@ -6,10 +6,17 @@ import OcrPanel from './components/OcrPanel'
 import AsrPanel from './components/AsrPanel'
 import TimelineSwimlanes from './components/TimelineSwimlanes'
 import RiskReportPanel from './components/RiskReportPanel'
-import { ApiError, getEvents, getFrames, getVideo, uploadVideo } from './api/videos'
+import { ApiError, getEvents, getFrames, getVideo, uploadVideo, runOcr, runAsr, runReview } from './api/videos'
 import type { FramesInfo, SamplingMode, TimelineEvent, VideoJob, VideoUploadResponse } from './types'
 
 type Phase = 'idle' | 'uploading' | 'processing' | 'processed' | 'failed' | 'error'
+type WorkflowState = 'idle' | 'running' | 'success' | 'failed'
+interface WorkflowStatus {
+  state: WorkflowState
+  stage: 'ocr' | 'asr' | 'review' | null
+  message: string
+  retry: boolean
+}
 
 const POLL_INTERVAL_MS = 2000
 
@@ -50,6 +57,55 @@ export default function App() {
   // 视频真实时长（秒）：onLoadedMetadata 后填入，后端 metadata.duration 仅作初值
   const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
+
+  const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>({ state: 'idle', stage: null, message: '', retry: false })
+  const [reportRefreshKey, setReportRefreshKey] = useState(0)
+
+  const handleRunWorkflow = useCallback(async (videoId: string) => {
+    setWorkflowStatus({ state: 'running', stage: 'ocr', message: '正在执行 OCR...', retry: false })
+
+    const callWithRetry = async <T,>(apiCall: () => Promise<T>): Promise<T> => {
+      try {
+        return await apiCall()
+      } catch (err: any) {
+        if (err instanceof ApiError && err.status === 502) {
+          setWorkflowStatus((s) => ({ ...s, message: '云端冷启动，重试中...', retry: true }))
+          return await apiCall()
+        }
+        throw err
+      }
+    }
+
+    try {
+      const ocrRes = await callWithRetry(() => runOcr(videoId))
+      setWorkflowStatus({ state: 'running', stage: 'asr', message: `OCR 完成 (事件: ${ocrRes.event_count})，正在执行 ASR...`, retry: false })
+
+      const asrRes = await callWithRetry(() => runAsr(videoId))
+      setWorkflowStatus({ state: 'running', stage: 'review', message: `ASR 完成 (事件: ${asrRes.event_count})，正在执行多模态审核...`, retry: false })
+
+      await callWithRetry(() => runReview(videoId))
+
+      // Refresh events
+      const [newOcr, newAsr, newVlm] = await Promise.all([
+        getEvents(videoId, 'ocr'),
+        getEvents(videoId, 'asr'),
+        getEvents(videoId, 'vlm'),
+      ])
+      if (activeVideoIdRef.current !== videoId) return
+
+      setEvents((prev) => ({ ...prev, ocr: newOcr, asr: newAsr, vlm: newVlm }))
+      setReportRefreshKey((k) => k + 1)
+      setWorkflowStatus({ state: 'success', stage: null, message: '全流程审核完成', retry: false })
+    } catch (err: any) {
+      if (activeVideoIdRef.current !== videoId) return
+      setWorkflowStatus((s) => ({
+        state: 'failed',
+        stage: s.stage,
+        message: `阶段 ${s.stage?.toUpperCase()} 失败: ${err.message || '未知错误'}`,
+        retry: false,
+      }))
+    }
+  }, [])
 
   useEffect(() => {
     return () => cancelRef.current?.()
@@ -129,6 +185,7 @@ export default function App() {
       setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
       setCurrentTimeMs(0)
       setVideoDurationSec(null)
+      setWorkflowStatus({ state: 'idle', stage: null, message: '', retry: false })
       try {
         const upload = await uploadVideo(file, sampling)
         const initial = toJob(upload)
@@ -163,6 +220,23 @@ export default function App() {
     setCurrentTimeMs(0)
     setVideoDurationSec(null)
     setPhase('idle')
+    setWorkflowStatus({ state: 'idle', stage: null, message: '', retry: false })
+  }, [])
+
+  const [highlightMs, setHighlightMs] = useState<number | null>(null)
+
+  const handleSeekAndPause = useCallback((ms: number) => {
+    setHighlightMs(ms)
+    if (videoRef.current) {
+      // clip logic: prevent seeking beyond duration, handle NaN safely
+      const d = videoRef.current.duration
+      if (Number.isFinite(d) && d > 0) {
+        videoRef.current.currentTime = Math.min(Math.max(ms / 1000, 0), d)
+      } else {
+        videoRef.current.currentTime = ms / 1000
+      }
+      videoRef.current.pause()
+    }
   }, [])
 
   return (
@@ -232,7 +306,30 @@ export default function App() {
                 />
               </div>
               <div className="workbench-right">
-                <RiskReportPanel videoId={job.video_id} vlmEvents={events.vlm} />
+                <RiskReportPanel videoId={job.video_id} vlmEvents={events.vlm} refreshKey={reportRefreshKey} onSeek={handleSeekAndPause} />
+                
+                <div className="workflow-panel panel" style={{ marginBottom: 16 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                    <h3 style={{ margin: 0, fontSize: 15 }}>全流程自动审核</h3>
+                    <button
+                      className="primary"
+                      type="button"
+                      disabled={workflowStatus.state === 'running'}
+                      onClick={() => handleRunWorkflow(job.video_id)}
+                    >
+                      {workflowStatus.state === 'running' ? '审核中...' : '一键审核'}
+                    </button>
+                  </div>
+                  {workflowStatus.state !== 'idle' && (
+                    <div className={`workflow-status ${workflowStatus.state}`} style={{ marginTop: 12, padding: '8px 12px', background: 'var(--bg)', borderRadius: 4, fontSize: 13, display: 'flex', alignItems: 'center' }}>
+                      {workflowStatus.state === 'running' && <div className="spinner" style={{ width: 12, height: 12, marginRight: 8, borderWidth: 2, display: 'inline-block' }} />}
+                      <span style={{ color: workflowStatus.state === 'failed' ? 'var(--error)' : workflowStatus.state === 'success' ? '#4caf50' : 'inherit' }}>
+                        {workflowStatus.message}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
                 <div className="modality-actions">
                   <OcrPanel videoId={job.video_id} onEvents={(evs) => setEvents((prev) => ({ ...prev, ocr: evs }))} />
                   <AsrPanel videoId={job.video_id} onEvents={(evs) => setEvents((prev) => ({ ...prev, asr: evs }))} />
@@ -244,17 +341,12 @@ export default function App() {
               duration={videoDurationSec ?? job.metadata?.duration ?? null}
               currentTimeMs={currentTimeMs}
               events={events}
-              onSeek={(ms) => {
-                if (videoRef.current) {
-                  videoRef.current.currentTime = ms / 1000
-                  videoRef.current.play().catch(() => {})
-                }
-              }}
+              onSeek={handleSeekAndPause}
             />
 
             <details className="frames-collapsible panel">
               <summary>查看抽取帧 ({framesInfo?.count ?? 0})</summary>
-              {framesInfo && <FramesGrid videoId={job.video_id} framesInfo={framesInfo} />}
+              {framesInfo && <FramesGrid videoId={job.video_id} framesInfo={framesInfo} highlightMs={highlightMs} />}
             </details>
 
             <button className="primary" type="button" onClick={handleReset} style={{ marginTop: 24 }}>

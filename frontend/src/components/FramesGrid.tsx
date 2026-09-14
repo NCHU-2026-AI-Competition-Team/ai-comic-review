@@ -1,9 +1,11 @@
+import { useEffect, useRef, useMemo } from 'react'
 import type { FramesInfo } from '../types'
 import { frameImageUrl } from '../api/videos'
 
 interface Props {
   videoId: string
   framesInfo: FramesInfo
+  highlightMs?: number | null
 }
 
 /** 毫秒时间戳转 HH:MM:SS.mmm，例如 32500 → 00:00:32.500 */
@@ -17,25 +19,59 @@ export function formatTimestamp(timestampMs: number): string {
   return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}.${pad(ms, 3)}`
 }
 
-export default function FramesGrid({ videoId, framesInfo }: Props) {
+export default function FramesGrid({ videoId, framesInfo, highlightMs }: Props) {
+  const listRef = useRef<HTMLUListElement>(null)
+
+  const nearestFrameId = useMemo(() => {
+    if (highlightMs == null || framesInfo.count === 0) return null
+    let minDiff = Infinity
+    let nearestId = framesInfo.frames[0].frame_id
+    for (const frame of framesInfo.frames) {
+      const diff = Math.abs(frame.timestamp_ms - highlightMs)
+      if (diff < minDiff) {
+        minDiff = diff
+        nearestId = frame.frame_id
+      }
+    }
+    return nearestId
+  }, [highlightMs, framesInfo])
+
+  useEffect(() => {
+    if (nearestFrameId && listRef.current) {
+      const el = listRef.current.querySelector(`[data-frame-id="${nearestFrameId}"]`)
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' })
+      }
+    }
+  }, [nearestFrameId])
+
   if (framesInfo.count === 0) {
     return <p className="hint">未抽取到任何帧</p>
   }
   return (
     <div className="frames">
       <h3>抽取帧（{framesInfo.count}）</h3>
-      <ul className="frames-grid">
-        {framesInfo.frames.map((frame) => (
-          <li key={frame.frame_id} className="frame-item">
-            <img
-              src={frameImageUrl(videoId, frame)}
-              alt={`第 ${formatTimestamp(frame.timestamp_ms)} 帧`}
-              loading="lazy"
-            />
-            <span className="frame-timestamp">{formatTimestamp(frame.timestamp_ms)}</span>
-          </li>
-        ))}
+      <ul className="frames-grid" ref={listRef}>
+        {framesInfo.frames.map((frame) => {
+          const isHighlighted = frame.frame_id === nearestFrameId
+          return (
+            <li 
+              key={frame.frame_id} 
+              data-frame-id={frame.frame_id}
+              className={`frame-item ${isHighlighted ? 'highlighted' : ''}`}
+              style={isHighlighted ? { outline: '3px solid var(--primary)', transform: 'scale(1.05)', transition: 'all 0.2s', zIndex: 1 } : { transition: 'all 0.2s' }}
+            >
+              <img
+                src={frameImageUrl(videoId, frame)}
+                alt={`第 ${formatTimestamp(frame.timestamp_ms)} 帧`}
+                loading="lazy"
+              />
+              <span className="frame-timestamp">{formatTimestamp(frame.timestamp_ms)}</span>
+            </li>
+          )
+        })}
       </ul>
     </div>
   )
 }
+

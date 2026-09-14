@@ -116,3 +116,31 @@ export async function getReport(videoId: string): Promise<RiskReport> {
   }
   return (await res.json()) as RiskReport
 }
+
+/** 触发全片风险审核 */
+export async function runReview(videoId: string): Promise<RiskReport> {
+  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/review`, {
+    method: 'POST',
+  })
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+  return (await res.json()) as RiskReport
+}
+
+/** 提交人工复核结果 */
+export async function submitVerdict(
+  videoId: string,
+  verdict: { decision: 'approve' | 'reject' | 'false_positive'; note: string; event_id: string | null }
+): Promise<void> {
+  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/verdict`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(verdict),
+  })
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+}

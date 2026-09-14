@@ -108,4 +108,9 @@ export interface RiskReport {
   }
   risk_events: RiskEvent[]
   overall: RiskReportOverall
+  verdict?: {
+    decision: 'approve' | 'reject' | 'false_positive'
+    note: string
+    event_id: string | null
+  } | null
 }
