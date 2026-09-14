@@ -65,8 +65,8 @@ export async function getFrames(videoId: string): Promise<FramesInfo> {
 }
 
 /** 对已完成抽帧的视频同步执行 OCR，返回产出的事件数量。 */
-export async function runOcr(videoId: string): Promise<ModalityRunResponse> {
-  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/ocr`, {
+export async function runOcr(videoId: string, force = false): Promise<ModalityRunResponse> {
+  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/ocr${force ? '?force=true' : ''}`, {
     method: 'POST',
   })
   if (!res.ok) {
@@ -76,8 +76,8 @@ export async function runOcr(videoId: string): Promise<ModalityRunResponse> {
 }
 
 /** 对视频同步执行 ASR（自动提取音频），返回产出的事件数量。 */
-export async function runAsr(videoId: string): Promise<ModalityRunResponse> {
-  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/asr`, {
+export async function runAsr(videoId: string, force = false): Promise<ModalityRunResponse> {
+  const res = await fetch(`${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/asr${force ? '?force=true' : ''}`, {
     method: 'POST',
   })
   if (!res.ok) {
@@ -86,7 +86,7 @@ export async function runAsr(videoId: string): Promise<ModalityRunResponse> {
   return (await res.json()) as ModalityRunResponse
 }
 
-/** 读取已生成的模态事件列表（ocr / asr）。 */
+/** 读取已生成的模态事件列表（ocr / asr / vlm 等）。 */
 export async function getEvents(videoId: string, modality: EventModality = 'ocr'): Promise<TimelineEvent[]> {
   const res = await fetch(
     `${BASE_URL}/api/videos/${encodeURIComponent(videoId)}/events?modality=${encodeURIComponent(modality)}`,

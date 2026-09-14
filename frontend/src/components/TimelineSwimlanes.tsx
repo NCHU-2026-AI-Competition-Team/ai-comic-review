@@ -13,7 +13,12 @@ interface Props {
 }
 
 export default function TimelineSwimlanes({ duration, currentTimeMs, events, onSeek }: Props) {
-  const totalMs = duration ? duration * 1000 : 1 // 避免除以 0
+  const allEvents = [...events.ocr, ...events.asr, ...events.vision, ...events.vlm]
+  // duration 缺失或为 0 时，以事件最大 end_ms 作为临时轴长并提示「时长未知」
+  const durationMs = duration && duration > 0 ? duration * 1000 : null
+  const maxEventEndMs = allEvents.reduce((max, ev) => Math.max(max, ev.end_ms), 0)
+  const durationUnknown = durationMs === null
+  const totalMs = durationMs ?? Math.max(maxEventEndMs, 1) // 兜底 1ms 避免除以 0
 
   const renderSwimlane = (title: string, modalityEvents: TimelineEvent[], color: string, emptyText?: string) => {
     return (
@@ -29,8 +34,11 @@ export default function TimelineSwimlanes({ duration, currentTimeMs, events, onS
             <div className="swimlane-empty">{emptyText}</div>
           )}
           {modalityEvents.map((ev) => {
-            let leftPercent = (ev.start_ms / totalMs) * 100
-            let widthPercent = ((ev.end_ms - ev.start_ms) / totalMs) * 100
+            // 渲染前将事件区间钳制到 [0, totalMs]，且保证 end >= start
+            const startMs = Math.min(Math.max(ev.start_ms, 0), totalMs)
+            const endMs = Math.min(Math.max(ev.end_ms, startMs), totalMs)
+            const leftPercent = (startMs / totalMs) * 100
+            let widthPercent = ((endMs - startMs) / totalMs) * 100
             // 如果宽度太小（例如单帧的 OCR 事件），给一个最小宽度
             if (widthPercent < 0.5) widthPercent = 0.5
             if (leftPercent + widthPercent > 100) widthPercent = 100 - leftPercent
@@ -57,11 +65,14 @@ export default function TimelineSwimlanes({ duration, currentTimeMs, events, onS
 
   return (
     <div className="timeline-swimlanes panel">
-      <h2>时间轴</h2>
+      <h2>
+        时间轴
+        {durationUnknown && <span className="hint">（时长未知，按事件范围估算）</span>}
+      </h2>
       <div className="swimlanes-container">
         <div className="swimlanes-cursor" style={{ left: cursorLeft }} />
-        {renderSwimlane('OCR', events.ocr, 'var(--accent)')}
-        {renderSwimlane('ASR', events.asr, '#4caf50')}
+        {renderSwimlane('OCR', events.ocr, 'var(--accent)', '尚未运行 OCR')}
+        {renderSwimlane('ASR', events.asr, '#4caf50', '尚未运行 ASR')}
         {renderSwimlane('Vision', events.vision, '#ff9800', '暂无视觉事件')}
         {renderSwimlane('VLM', events.vlm, '#e91e63', '暂无多模态分析')}
       </div>

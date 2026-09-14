@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 import sys
 import uuid
 from pathlib import Path
@@ -32,7 +33,7 @@ from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadRes
 from app.services import asr_pipeline, audio, ocr_pipeline, registry
 from app.services.modality_store import modality_result_path
 from app.services.storage_paths import UnsafePathError, resolve_in_dir
-from app.services.uploads import ALLOWED_VIDEO_EXTENSIONS
+from app.services.uploads import ALLOWED_VIDEO_EXTENSIONS, UploadNotFoundError, find_uploaded_file
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,13 @@ router = APIRouter(prefix="/videos", tags=["videos"])
 ALLOWED_EXTENSIONS = set(ALLOWED_VIDEO_EXTENSIONS)
 ALLOWED_FRAME_SUFFIXES = {".jpg", ".jpeg", ".png"}
 ALLOWED_SAMPLING_MODES = {"fixed_fps", "scene"}
+
+# 视频流响应的 MIME 按文件后缀映射，缺失时回退通用二进制类型
+VIDEO_MEDIA_TYPES = {
+    ".mp4": "video/mp4",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+}
 
 
 def _validate_video_id(video_id: str) -> str:
@@ -147,13 +155,58 @@ def get_video(video_id: str) -> VideoJob:
     return job
 
 
+def _video_media_type(video_path: Path) -> str:
+    """按文件后缀返回视频 MIME 类型。"""
+    return VIDEO_MEDIA_TYPES.get(video_path.suffix.lower(), "application/octet-stream")
+
+
+def _range_not_satisfiable(file_size: int) -> HTTPException:
+    """构造 416 响应，统一携带 Content-Range: bytes */{file_size}。"""
+    return HTTPException(
+        status_code=416,
+        detail="Requested Range Not Satisfiable",
+        headers={"Content-Range": f"bytes */{file_size}"},
+    )
+
+
+def _parse_range(range_header: str, file_size: int) -> tuple[int, int] | None:
+    """将 Range 请求头解析为 (start, end) 闭区间。
+
+    仅接受 bytes=start-end / bytes=start- / bytes=-suffix 三类单区间；
+    多区间或无法识别的畸形值返回 None（忽略 Range，回退 200 全量）；
+    合法但不可满足的区间抛 416。end 超出文件大小时裁剪到 file_size-1。
+    """
+    value = range_header.strip()
+    if not value.startswith("bytes="):
+        return None
+    spec = value[len("bytes="):]
+    if "," in spec:
+        # 多区间暂不实现 multipart/byteranges，按 RFC 允许的方式忽略 Range
+        return None
+    match = re.fullmatch(r"(\d*)-(\d*)", spec)
+    if match is None or (not match.group(1) and not match.group(2)):
+        return None
+    start_s, end_s = match.group(1), match.group(2)
+    if file_size <= 0:
+        raise _range_not_satisfiable(file_size)
+    if not start_s:
+        # bytes=-suffix：取文件末尾 suffix 字节
+        suffix = int(end_s)
+        if suffix <= 0:
+            raise _range_not_satisfiable(file_size)
+        return max(file_size - suffix, 0), file_size - 1
+    start = int(start_s)
+    end = int(end_s) if end_s else file_size - 1
+    if end >= file_size:
+        end = file_size - 1
+    if start >= file_size or start > end:
+        raise _range_not_satisfiable(file_size)
+    return start, end
+
+
 @router.get("/{video_id}/file")
 def get_video_file(video_id: str, request: Request) -> Response:
-    """流式返回原始视频，支持 HTTP Range。"""
-    from fastapi import Request, Response
-    from fastapi.responses import StreamingResponse, FileResponse
-    from app.services.uploads import UploadNotFoundError, find_uploaded_file
-
+    """流式返回原始视频，支持单区间 HTTP Range。"""
     video_id = _validate_video_id(video_id)
     try:
         video_path = find_uploaded_file(video_id)
@@ -161,26 +214,8 @@ def get_video_file(video_id: str, request: Request) -> Response:
         raise HTTPException(status_code=404, detail="视频文件不存在") from None
 
     file_size = video_path.stat().st_size
+    media_type = _video_media_type(video_path)
     range_header = request.headers.get("range")
-
-    if not range_header:
-        return FileResponse(video_path, media_type="video/mp4", headers={"Accept-Ranges": "bytes"})
-
-    try:
-        range_match = range_header.replace("bytes=", "").split("-")
-        start = int(range_match[0]) if range_match[0] else 0
-        end = int(range_match[1]) if len(range_match) > 1 and range_match[1] else file_size - 1
-    except ValueError:
-        raise HTTPException(status_code=416, detail="Requested Range Not Satisfiable")
-
-    if start >= file_size or end >= file_size or start > end:
-        raise HTTPException(
-            status_code=416,
-            detail="Requested Range Not Satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"}
-        )
-
-    chunk_size = end - start + 1
 
     def file_iterator(path: Path, start_pos: int, chunk_sz: int):
         with open(path, "rb") as f:
@@ -194,6 +229,21 @@ def get_video_file(video_id: str, request: Request) -> Response:
                 bytes_read += len(data)
                 yield data
 
+    parsed = _parse_range(range_header, file_size) if range_header else None
+    if parsed is None:
+        if not range_header:
+            return FileResponse(video_path, media_type=media_type, headers={"Accept-Ranges": "bytes"})
+        # 忽略无法支持的 Range（多区间/畸形值）返回 200 全量；
+        # 不能走 FileResponse，否则 Starlette 会按 scope 里的 Range 头自行处理
+        return StreamingResponse(
+            file_iterator(video_path, 0, file_size),
+            media_type=media_type,
+            headers={"Accept-Ranges": "bytes", "Content-Length": str(file_size)},
+        )
+
+    start, end = parsed
+    chunk_size = end - start + 1
+
     headers = {
         "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges": "bytes",
@@ -202,10 +252,9 @@ def get_video_file(video_id: str, request: Request) -> Response:
     return StreamingResponse(
         file_iterator(video_path, start, chunk_size),
         status_code=206,
-        media_type="video/mp4",
+        media_type=media_type,
         headers=headers
     )
-
 
 
 @router.get("/{video_id}/frames", response_model=FramesInfo)
@@ -239,7 +288,10 @@ def get_frame_image(video_id: str, filename: str) -> FileResponse:
 
 
 @router.post("/{video_id}/ocr", response_model=ModalityRunResponse)
-def run_video_ocr(video_id: str) -> ModalityRunResponse:
+def run_video_ocr(
+    video_id: str,
+    force: bool = Query(False, description="与 ASR 接口对齐的保留参数；OCR 当前总是重新识别"),
+) -> ModalityRunResponse:
     """对已完成抽帧的视频同步执行 OCR，产出 ocr 模态时间线事件。"""
     video_id = _validate_video_id(video_id)
     try:

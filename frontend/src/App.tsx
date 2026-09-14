@@ -6,7 +6,7 @@ import OcrPanel from './components/OcrPanel'
 import AsrPanel from './components/AsrPanel'
 import TimelineSwimlanes from './components/TimelineSwimlanes'
 import RiskReportPanel from './components/RiskReportPanel'
-import { ApiError, getFrames, getVideo, uploadVideo } from './api/videos'
+import { ApiError, getEvents, getFrames, getVideo, uploadVideo } from './api/videos'
 import type { FramesInfo, SamplingMode, TimelineEvent, VideoJob, VideoUploadResponse } from './types'
 
 type Phase = 'idle' | 'uploading' | 'processing' | 'processed' | 'failed' | 'error'
@@ -32,6 +32,8 @@ export default function App() {
   const [framesInfo, setFramesInfo] = useState<FramesInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
   const cancelRef = useRef<(() => void) | null>(null)
+  // 当前生效的视频 id：异步轮询/请求返回时校验，防止过期结果覆盖新视频状态
+  const activeVideoIdRef = useRef<string | null>(null)
 
   const [events, setEvents] = useState<{
     ocr: TimelineEvent[]
@@ -45,6 +47,8 @@ export default function App() {
     vlm: [],
   })
   const [currentTimeMs, setCurrentTimeMs] = useState(0)
+  // 视频真实时长（秒）：onLoadedMetadata 后填入，后端 metadata.duration 仅作初值
+  const [videoDurationSec, setVideoDurationSec] = useState<number | null>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
 
   useEffect(() => {
@@ -53,8 +57,11 @@ export default function App() {
 
   const loadFrames = useCallback(async (videoId: string, fallback: FramesInfo | null) => {
     try {
-      setFramesInfo(await getFrames(videoId))
+      const frames = await getFrames(videoId)
+      if (activeVideoIdRef.current !== videoId) return
+      setFramesInfo(frames)
     } catch (err) {
+      if (activeVideoIdRef.current !== videoId) return
       if (err instanceof ApiError && err.status === 404) {
         setFramesInfo(fallback)
         return
@@ -64,8 +71,19 @@ export default function App() {
     }
   }, [])
 
+  const loadVlmEvents = useCallback(async (videoId: string) => {
+    try {
+      const vlmEvents = await getEvents(videoId, 'vlm')
+      if (activeVideoIdRef.current !== videoId) return
+      setEvents((prev) => ({ ...prev, vlm: vlmEvents }))
+    } catch {
+      // VLM 结果未生成（404）或读取失败时保持空态，不影响其他面板
+    }
+  }, [])
+
   const startPolling = useCallback(
     (videoId: string) => {
+      cancelRef.current?.() // 先取消上一轮轮询，避免旧任务继续写状态
       let cancelled = false
       cancelRef.current = () => {
         cancelled = true
@@ -74,11 +92,12 @@ export default function App() {
         while (!cancelled) {
           try {
             const current = await getVideo(videoId)
-            if (cancelled) return
+            if (cancelled || activeVideoIdRef.current !== videoId) return
             setJob(current)
             if (current.status === 'processed') {
               setPhase('processed')
               await loadFrames(videoId, current.frames)
+              await loadVlmEvents(videoId)
               return
             }
             if (current.status === 'failed') {
@@ -87,7 +106,7 @@ export default function App() {
               return
             }
           } catch (err) {
-            if (cancelled) return
+            if (cancelled || activeVideoIdRef.current !== videoId) return
             setError(err instanceof Error ? err.message : '查询处理状态失败')
             setPhase('error')
             return
@@ -97,23 +116,28 @@ export default function App() {
       }
       void tick()
     },
-    [loadFrames],
+    [loadFrames, loadVlmEvents],
   )
 
   const handleSubmit = useCallback(
     async (file: File, sampling: SamplingMode) => {
+      cancelRef.current?.() // 取消旧视频的轮询
+      activeVideoIdRef.current = null
       setPhase('uploading')
       setError(null)
       setFramesInfo(null)
       setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
       setCurrentTimeMs(0)
+      setVideoDurationSec(null)
       try {
         const upload = await uploadVideo(file, sampling)
         const initial = toJob(upload)
+        activeVideoIdRef.current = initial.video_id
         setJob(initial)
         if (initial.status === 'processed') {
           setPhase('processed')
           await loadFrames(initial.video_id, initial.frames)
+          await loadVlmEvents(initial.video_id)
         } else if (initial.status === 'failed') {
           setPhase('failed')
         } else {
@@ -125,17 +149,19 @@ export default function App() {
         setPhase('error')
       }
     },
-    [loadFrames, startPolling],
+    [loadFrames, loadVlmEvents, startPolling],
   )
 
   const handleReset = useCallback(() => {
     cancelRef.current?.()
     cancelRef.current = null
+    activeVideoIdRef.current = null
     setJob(null)
     setFramesInfo(null)
     setError(null)
     setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
     setCurrentTimeMs(0)
+    setVideoDurationSec(null)
     setPhase('idle')
   }, [])
 
@@ -196,6 +222,12 @@ export default function App() {
                   className="workbench-video"
                   controls
                   src={`/api/videos/${job.video_id}/file`}
+                  onLoadedMetadata={(e) => {
+                    const realDuration = e.currentTarget.duration
+                    if (Number.isFinite(realDuration) && realDuration > 0) {
+                      setVideoDurationSec(realDuration)
+                    }
+                  }}
                   onTimeUpdate={(e) => setCurrentTimeMs(e.currentTarget.currentTime * 1000)}
                 />
               </div>
@@ -209,7 +241,7 @@ export default function App() {
             </div>
 
             <TimelineSwimlanes
-              duration={job.metadata?.duration ?? null}
+              duration={videoDurationSec ?? job.metadata?.duration ?? null}
               currentTimeMs={currentTimeMs}
               events={events}
               onSeek={(ms) => {

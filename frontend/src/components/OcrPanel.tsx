@@ -15,35 +15,40 @@ export default function OcrPanel({ videoId, onEvents }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [reused, setReused] = useState(false)
 
-  const handleRun = useCallback(async () => {
-    setRunning(true)
-    setError(null)
-    setEvents(null)
-    setReused(false)
-    if (onEvents) onEvents([])
-    try {
-      const res = await runOcr(videoId)
-      setReused(res.reused ?? false)
-      const newEvents = await getEvents(videoId, 'ocr')
-      setEvents(newEvents)
-      if (onEvents) onEvents(newEvents)
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setError('视频尚未完成抽帧，请先完成视频处理')
-      } else {
-        setError(err instanceof Error ? err.message : 'OCR 执行失败')
+  const hasResult = events !== null
+
+  const handleRun = useCallback(
+    async (force: boolean) => {
+      setRunning(true)
+      setError(null)
+      setReused(false)
+      // 重跑期间保留旧结果，仅在新结果成功返回后替换
+      try {
+        const res = await runOcr(videoId, force)
+        setReused(res.reused ?? false)
+        const newEvents = await getEvents(videoId, 'ocr')
+        setEvents(newEvents)
+        if (onEvents) onEvents(newEvents)
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          setError('视频尚未完成抽帧，请先完成视频处理')
+        } else {
+          setError(err instanceof Error ? err.message : 'OCR 执行失败')
+        }
+      } finally {
+        setRunning(false)
       }
-    } finally {
-      setRunning(false)
-    }
-  }, [videoId, onEvents])
+    },
+    [videoId, onEvents],
+  )
 
   return (
-    <div className="modality-panel ocr-panel">
+    <div className="modality-panel">
       <h3>文字识别（OCR）</h3>
-      <button className="primary" type="button" disabled={running} onClick={handleRun}>
-        {running ? 'OCR 识别中……' : '运行 OCR'}
+      <button className="primary" type="button" disabled={running} onClick={() => void handleRun(hasResult)}>
+        {running ? (hasResult ? '正在重跑 OCR……' : 'OCR 识别中……') : hasResult ? '重跑 OCR' : '运行 OCR'}
       </button>
+      {running && hasResult && <p className="hint">正在重跑，旧结果暂时保留</p>}
       {reused && <p className="hint">已复用上次成功结果</p>}
       {error && <p className="form-error">{error}</p>}
       {events && events.length === 0 && <p className="hint">未识别到任何文字</p>}
@@ -61,4 +66,3 @@ export default function OcrPanel({ videoId, onEvents }: Props) {
     </div>
   )
 }
-

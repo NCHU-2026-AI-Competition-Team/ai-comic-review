@@ -292,6 +292,83 @@ def test_get_video_file_range_request(client: TestClient) -> None:
     assert response.headers["Content-Range"] == "bytes 5-9/18"
     assert response.content == b"video"
 
+def _write_uploaded_video(ext: str = ".mp4", content: bytes = b"test video content") -> None:
+    upload_dir = get_settings().uploads_path
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    (upload_dir / f"{VALID_VIDEO_ID}{ext}").write_bytes(content)
+
+def test_get_video_file_range_suffix(client: TestClient) -> None:
+    """bytes=-5 应返回文件最后 5 字节。"""
+    _write_uploaded_video()
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=-5"})
+    assert response.status_code == 206
+    assert response.headers["Content-Range"] == "bytes 13-17/18"
+    assert response.content == b"ntent"
+
+def test_get_video_file_range_suffix_exceeds_size(client: TestClient) -> None:
+    """suffix 超过文件大小时返回全量内容（206）。"""
+    _write_uploaded_video()
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=-500"})
+    assert response.status_code == 206
+    assert response.headers["Content-Range"] == "bytes 0-17/18"
+    assert response.content == b"test video content"
+
+def test_get_video_file_range_open_end(client: TestClient) -> None:
+    """bytes=5- 应返回到文件末尾。"""
+    _write_uploaded_video()
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=5-"})
+    assert response.status_code == 206
+    assert response.headers["Content-Range"] == "bytes 5-17/18"
+    assert response.content == b"video content"
+
+def test_get_video_file_range_end_clipped(client: TestClient) -> None:
+    """end 超出文件大小时裁剪到 file_size-1，返回 206 而非 416。"""
+    _write_uploaded_video()
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=5-50"})
+    assert response.status_code == 206
+    assert response.headers["Content-Range"] == "bytes 5-17/18"
+    assert response.content == b"video content"
+
+def test_get_video_file_range_multi_ignored(client: TestClient) -> None:
+    """多区间暂不实现，忽略 Range 返回 200 全量。"""
+    _write_uploaded_video()
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=0-1,3-4"})
+    assert response.status_code == 200
+    assert response.content == b"test video content"
+
+def test_get_video_file_range_malformed_ignored(client: TestClient) -> None:
+    """畸形 Range 值忽略并返回 200 全量。"""
+    _write_uploaded_video()
+    for header in ("bytes=abc-def", "bytes=-1-3"):
+        response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": header})
+        assert response.status_code == 200
+        assert response.content == b"test video content"
+
+def test_get_video_file_range_unsatisfiable(client: TestClient) -> None:
+    """start 超出文件大小返回 416，且携带 Content-Range: bytes */{size}。"""
+    _write_uploaded_video()
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=100-200"})
+    assert response.status_code == 416
+    assert response.headers["Content-Range"] == "bytes */18"
+
+def test_get_video_file_media_type_by_extension(client: TestClient) -> None:
+    """.mov/.mkv 按后缀返回对应 MIME，Range 响应复用同一映射。"""
+    _write_uploaded_video(ext=".mov")
+    response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file")
+    assert response.status_code == 200
+    assert response.headers["Content-Type"] == "video/quicktime"
+
+    range_response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file", headers={"Range": "bytes=0-3"})
+    assert range_response.status_code == 206
+    assert range_response.headers["Content-Type"] == "video/quicktime"
+
+    # find_uploaded_file 按 .mp4/.mov/.mkv 顺序探测，需先移除 .mov 文件
+    (get_settings().uploads_path / f"{VALID_VIDEO_ID}.mov").unlink()
+    _write_uploaded_video(ext=".mkv")
+    mkv_response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file")
+    assert mkv_response.status_code == 200
+    assert mkv_response.headers["Content-Type"] == "video/x-matroska"
+
 def test_get_video_file_not_found(client: TestClient) -> None:
     response = client.get(f"/api/videos/{VALID_VIDEO_ID}/file")
     assert response.status_code == 404

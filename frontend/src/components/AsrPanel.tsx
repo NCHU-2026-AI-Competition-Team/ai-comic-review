@@ -15,35 +15,40 @@ export default function AsrPanel({ videoId, onEvents }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [reused, setReused] = useState(false)
 
-  const handleRun = useCallback(async () => {
-    setRunning(true)
-    setError(null)
-    setEvents(null)
-    setReused(false)
-    if (onEvents) onEvents([])
-    try {
-      const res = await runAsr(videoId)
-      setReused(res.reused ?? false)
-      const newEvents = await getEvents(videoId, 'asr')
-      setEvents(newEvents)
-      if (onEvents) onEvents(newEvents)
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 409) {
-        setError(err.message)
-      } else {
-        setError(err instanceof Error ? err.message : 'ASR 识别失败')
+  const hasResult = events !== null
+
+  const handleRun = useCallback(
+    async (force: boolean) => {
+      setRunning(true)
+      setError(null)
+      setReused(false)
+      // 重跑期间保留旧结果，仅在新结果成功返回后替换
+      try {
+        const res = await runAsr(videoId, force)
+        setReused(res.reused ?? false)
+        const newEvents = await getEvents(videoId, 'asr')
+        setEvents(newEvents)
+        if (onEvents) onEvents(newEvents)
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 409) {
+          setError(err.message)
+        } else {
+          setError(err instanceof Error ? err.message : 'ASR 识别失败')
+        }
+      } finally {
+        setRunning(false)
       }
-    } finally {
-      setRunning(false)
-    }
-  }, [videoId, onEvents])
+    },
+    [videoId, onEvents],
+  )
 
   return (
-    <div className="modality-panel asr-panel">
+    <div className="modality-panel">
       <h3>语音识别（ASR）</h3>
-      <button className="primary" type="button" disabled={running} onClick={handleRun}>
-        {running ? 'ASR 识别中……' : '运行 ASR'}
+      <button className="primary" type="button" disabled={running} onClick={() => void handleRun(hasResult)}>
+        {running ? (hasResult ? '正在重跑 ASR……' : 'ASR 识别中……') : hasResult ? '重跑 ASR' : '运行 ASR'}
       </button>
+      {running && hasResult && <p className="hint">正在重跑，旧结果暂时保留</p>}
       {reused && <p className="hint">已复用上次成功结果</p>}
       {error && <p className="form-error">{error}</p>}
       {events && events.length === 0 && <p className="hint">未识别到任何语音</p>}
@@ -63,4 +68,3 @@ export default function AsrPanel({ videoId, onEvents }: Props) {
     </div>
   )
 }
-
