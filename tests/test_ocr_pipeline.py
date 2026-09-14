@@ -159,7 +159,7 @@ def test_run_ocr_missing_frames_json_raises(tmp_path: Path) -> None:
 def test_run_ocr_default_provider_uses_singleton(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """不传 provider 时走 get_provider 单例（此处以桩验证接线，不触发真实引擎）。"""
+    """不传 provider 时走工厂单例（此处以桩验证接线，不触发真实引擎）。"""
     _write_frames_json([_frame()])
     called: list[bool] = []
 
@@ -167,11 +167,58 @@ def test_run_ocr_default_provider_uses_singleton(
         def recognize(self, image_path: Path) -> list[OcrTextLine]:
             return [OcrTextLine(text="stub", bbox=[[0, 0]], confidence=0.5)]
 
-    def fake_get_provider():
+    def fake_get_default_provider():
         called.append(True)
         return StubProvider()
 
-    monkeypatch.setattr(ocr_pipeline, "get_provider", fake_get_provider)
+    monkeypatch.setattr(ocr_pipeline, "get_default_provider", fake_get_default_provider)
     events = run_ocr(VIDEO_ID)
     assert called == [True]
     assert len(events) == 1 and events[0].content == "stub"
+
+
+def test_frame_lines_to_event_clamps_out_of_range_confidence() -> None:
+    """引擎返回越界置信度（<0 或 >1）时截断到 [0,1]，不导致事件校验失败。"""
+    lines = [
+        OcrTextLine(text="偏高", bbox=[[0, 0]], confidence=1.5),
+        OcrTextLine(text="偏低", bbox=[[0, 0]], confidence=-0.3),
+    ]
+    event = frame_lines_to_event(VIDEO_ID, _frame(), lines)
+
+    assert event is not None
+    assert event.confidence == pytest.approx(0.5)
+    assert event.metadata["lines"][0]["confidence"] == 1.0
+    assert event.metadata["lines"][1]["confidence"] == 0.0
+
+
+def test_run_ocr_tolerates_out_of_range_confidence() -> None:
+    """Provider 返回越界置信度时流水线不中断，事件正常落盘。"""
+
+    class OutOfRangeProvider:
+        def recognize(self, image_path: Path) -> list[OcrTextLine]:
+            return [OcrTextLine(text="越界", bbox=[[0, 0]], confidence=2.0)]
+
+    _write_frames_json([_frame()])
+    events = run_ocr(VIDEO_ID, provider=OutOfRangeProvider())
+    assert len(events) == 1
+    assert events[0].confidence == 1.0
+
+
+def test_pipeline_does_not_import_concrete_provider() -> None:
+    """防回归：业务层只允许依赖 OcrProvider 抽象与工厂入口，不得 import 具体实现模块。"""
+    import ast
+
+    source = Path(ocr_pipeline.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    imported_modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported_modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported_modules.add(node.module)
+
+    assert "ai.ocr.paddleocr" not in imported_modules
+    assert not any(
+        module.startswith("ai.ocr.") and module not in {"ai.ocr.base", "ai.ocr.factory"}
+        for module in imported_modules
+    ), f"ocr_pipeline 引入了抽象与工厂以外的 ai.ocr 模块：{imported_modules}"

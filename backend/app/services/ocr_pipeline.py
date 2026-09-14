@@ -28,7 +28,7 @@ if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
 from ai.ocr.base import OcrProvider, OcrTextLine  # noqa: E402
-from ai.ocr.paddleocr import get_provider  # noqa: E402
+from ai.ocr.factory import get_default_provider  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +56,17 @@ def load_frames_info(video_id: str) -> FramesInfo:
         raise FramesCorruptedError(f"帧清单文件损坏 video_id={video_id}") from exc
 
 
+def _clamp_confidence(value: float, frame_id: str) -> float:
+    """把引擎返回的置信度截断到 [0, 1]，越界时记警告（不中断流水线）。"""
+    if 0.0 <= value <= 1.0:
+        return value
+    clamped = min(1.0, max(0.0, value))
+    logger.warning(
+        "OCR 置信度越界，已截断 frame_id=%s 原值=%s 截断后=%s", frame_id, value, clamped
+    )
+    return clamped
+
+
 def frame_lines_to_event(
     video_id: str, frame: FrameInfo, lines: list[OcrTextLine]
 ) -> Optional[TimelineEvent]:
@@ -63,22 +74,31 @@ def frame_lines_to_event(
 
     时间戳与帧严格对齐（start_ms=end_ms=timestamp_ms），保证多模态事件
     可基于同一时间轴融合；逐行明细保留在 metadata.lines 供追溯。
+    置信度先逐行截断到 [0, 1] 再取均值，避免引擎异常值导致事件校验失败。
     """
     if not lines:
         return None
+    clamped = [
+        OcrTextLine(
+            text=line.text,
+            bbox=line.bbox,
+            confidence=_clamp_confidence(line.confidence, frame.frame_id),
+        )
+        for line in lines
+    ]
     return TimelineEvent(
         id=f"ocr-{frame.frame_id}",
         video_id=video_id,
         modality="ocr",
         start_ms=frame.timestamp_ms,
         end_ms=frame.timestamp_ms,
-        content="\n".join(line.text for line in lines),
-        confidence=sum(line.confidence for line in lines) / len(lines),
+        content="\n".join(line.text for line in clamped),
+        confidence=sum(line.confidence for line in clamped) / len(clamped),
         metadata={
             "frame_id": frame.frame_id,
             "lines": [
                 {"text": line.text, "confidence": line.confidence, "box": line.bbox}
-                for line in lines
+                for line in clamped
             ],
         },
     )
@@ -92,11 +112,11 @@ def ocr_result_path(video_id: str) -> Path:
 def run_ocr(video_id: str, provider: Optional[OcrProvider] = None) -> list[TimelineEvent]:
     """对指定视频执行 OCR，聚合结果落盘 ocr.json 并返回事件列表。
 
-    provider 可注入以便测试替换；默认使用进程级惰性单例。
+    provider 可注入以便测试替换；默认使用进程级惰性单例（工厂入口）。
     """
     frames_info = load_frames_info(video_id)
     if provider is None:
-        provider = get_provider()
+        provider = get_default_provider()
     frames_dir = get_settings().frames_path / video_id
 
     events = []
