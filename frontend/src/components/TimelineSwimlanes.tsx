@@ -6,18 +6,16 @@ interface Props {
   events: {
     ocr: TimelineEvent[]
     asr: TimelineEvent[]
-    vision: TimelineEvent[]
     vlm: TimelineEvent[]
   }
   onSeek: (ms: number) => void
 }
 
 export default function TimelineSwimlanes({ duration, currentTimeMs, events, onSeek }: Props) {
-  const allEvents = [...events.ocr, ...events.asr, ...events.vision, ...events.vlm]
+  const allEvents = [...events.ocr, ...events.asr, ...events.vlm]
   // duration 缺失或为 0 时，以事件最大 end_ms 作为临时轴长并提示「时长未知」
   const durationMs = duration && duration > 0 ? duration * 1000 : null
   const maxEventEndMs = allEvents.reduce((max, ev) => Math.max(max, ev.end_ms), 0)
-  const durationUnknown = durationMs === null
   const totalMs = durationMs ?? Math.max(maxEventEndMs, 1) // 兜底 1ms 避免除以 0
 
   const renderSwimlane = (title: string, modalityEvents: TimelineEvent[], color: string, emptyText?: string) => {
@@ -64,16 +62,11 @@ export default function TimelineSwimlanes({ duration, currentTimeMs, events, onS
   const cursorLeft = `${Math.min(100, Math.max(0, (currentTimeMs / totalMs) * 100))}%`
 
   return (
-    <div className="timeline-swimlanes panel">
-      <h2>
-        时间轴
-        {durationUnknown && <span className="hint">（时长未知，按事件范围估算）</span>}
-      </h2>
-      <div className="swimlanes-container">
+    <div className="timeline-swimlanes" style={{ borderTop: '1px solid var(--border)' }}>
+      <div className="swimlanes-container" style={{ borderRadius: '0 0 var(--radius-lg) var(--radius-lg)', border: 'none', boxShadow: 'none' }}>
         <div className="swimlanes-cursor" style={{ left: cursorLeft }} />
         {renderSwimlane('OCR', events.ocr, 'var(--accent)', '尚未运行 OCR')}
         {renderSwimlane('ASR', events.asr, '#4caf50', '尚未运行 ASR')}
-        {renderSwimlane('Vision', events.vision, '#ff9800', '暂无视觉事件')}
         {renderSwimlane('VLM', events.vlm, '#e91e63', '暂无多模态分析')}
       </div>
     </div>

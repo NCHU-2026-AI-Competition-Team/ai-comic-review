@@ -46,12 +46,10 @@ export default function App() {
   const [events, setEvents] = useState<{
     ocr: TimelineEvent[]
     asr: TimelineEvent[]
-    vision: TimelineEvent[]
     vlm: TimelineEvent[]
   }>({
     ocr: [],
     asr: [],
-    vision: [],
     vlm: [],
   })
   const [currentTimeMs, setCurrentTimeMs] = useState(0)
@@ -183,7 +181,7 @@ export default function App() {
       setPhase('uploading')
       setError(null)
       setFramesInfo(null)
-      setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
+      setEvents({ ocr: [], asr: [], vlm: [] })
       setCurrentTimeMs(0)
       setVideoDurationSec(null)
       setWorkflowStatus({ state: 'idle', stage: null, message: '', retry: false })
@@ -217,7 +215,7 @@ export default function App() {
     setJob(null)
     setFramesInfo(null)
     setError(null)
-    setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
+    setEvents({ ocr: [], asr: [], vlm: [] })
     setCurrentTimeMs(0)
     setVideoDurationSec(null)
     setPhase('idle')
@@ -231,7 +229,7 @@ export default function App() {
     setJob(null)
     setFramesInfo(null)
     setError(null)
-    setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
+    setEvents({ ocr: [], asr: [], vlm: [] })
     setCurrentTimeMs(0)
     setVideoDurationSec(null)
     setWorkflowStatus({ state: 'idle', stage: null, message: '', retry: false })
@@ -318,7 +316,7 @@ export default function App() {
 
         {phase === 'processed' && job && (
           <div className="workbench-layout">
-            <div className="workbench-top panel">
+            <div className="workbench-top panel" style={{ padding: '12px 16px' }}>
               <VideoInfoPanel
                 filename={job.filename}
                 metadata={job.metadata}
@@ -329,7 +327,7 @@ export default function App() {
             </div>
 
             <div className="workbench-main">
-              <div className="workbench-left">
+              <div className="workbench-left" style={{ display: 'flex', flexDirection: 'column' }}>
                 <video
                   ref={videoRef}
                   className="workbench-video"
@@ -342,6 +340,12 @@ export default function App() {
                     }
                   }}
                   onTimeUpdate={(e) => setCurrentTimeMs(e.currentTarget.currentTime * 1000)}
+                />
+                <TimelineSwimlanes
+                  duration={videoDurationSec ?? job.metadata?.duration ?? null}
+                  currentTimeMs={currentTimeMs}
+                  events={events}
+                  onSeek={handleSeekAndPause}
                 />
               </div>
               <div className="workbench-right">
@@ -375,13 +379,6 @@ export default function App() {
                 </div>
               </div>
             </div>
-
-            <TimelineSwimlanes
-              duration={videoDurationSec ?? job.metadata?.duration ?? null}
-              currentTimeMs={currentTimeMs}
-              events={events}
-              onSeek={handleSeekAndPause}
-            />
 
             <details className="frames-collapsible panel">
               <summary>查看抽取帧 ({framesInfo?.count ?? 0})</summary>
