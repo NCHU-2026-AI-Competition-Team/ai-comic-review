@@ -165,14 +165,19 @@ export default function App() {
     }
   }, [])
 
-  const loadVlmEvents = useCallback(async (videoId: string) => {
-    try {
-      const vlmEvents = await getEvents(videoId, 'vlm')
-      if (activeVideoIdRef.current !== videoId) return
-      setEvents((prev) => ({ ...prev, vlm: vlmEvents }))
-    } catch {
-      // VLM 结果未生成（404）或读取失败时保持空态，不影响其他面板
-    }
+  const loadModalityEvents = useCallback(async (videoId: string) => {
+    const [ocrEvents, asrEvents, vlmEvents] = await Promise.all([
+      getEvents(videoId, 'ocr').catch(() => null),
+      getEvents(videoId, 'asr').catch(() => null),
+      getEvents(videoId, 'vlm').catch(() => null),
+    ])
+    if (activeVideoIdRef.current !== videoId) return
+    // 结果未生成（404）或读取失败的模态保持空态，不影响其他面板
+    setEvents((prev) => ({
+      ocr: ocrEvents ?? prev.ocr,
+      asr: asrEvents ?? prev.asr,
+      vlm: vlmEvents ?? prev.vlm,
+    }))
   }, [])
 
   const startPolling = useCallback(
@@ -191,7 +196,7 @@ export default function App() {
             if (current.status === 'processed') {
               setPhase('processed')
               await loadFrames(videoId, current.frames)
-              await loadVlmEvents(videoId)
+              await loadModalityEvents(videoId)
               return
             }
             if (current.status === 'failed') {
@@ -210,7 +215,7 @@ export default function App() {
       }
       void tick()
     },
-    [loadFrames, loadVlmEvents],
+    [loadFrames, loadModalityEvents],
   )
 
   const handleSubmit = useCallback(
@@ -232,7 +237,7 @@ export default function App() {
         if (initial.status === 'processed') {
           setPhase('processed')
           await loadFrames(initial.video_id, initial.frames)
-          await loadVlmEvents(initial.video_id)
+          await loadModalityEvents(initial.video_id)
         } else if (initial.status === 'failed') {
           setPhase('failed')
         } else {
@@ -244,7 +249,7 @@ export default function App() {
         setPhase('error')
       }
     },
-    [loadFrames, loadVlmEvents, startPolling],
+    [loadFrames, loadModalityEvents, startPolling],
   )
 
   const handleReset = useCallback(() => {
@@ -280,7 +285,7 @@ export default function App() {
       if (current.status === 'processed') {
         setPhase('processed')
         await loadFrames(videoId, current.frames)
-        await loadVlmEvents(videoId)
+        await loadModalityEvents(videoId)
       } else if (current.status === 'failed') {
         setError(current.error ?? '视频处理失败')
         setPhase('failed')
@@ -293,7 +298,7 @@ export default function App() {
       setError(err instanceof Error ? err.message : '加载历史任务失败')
       setPhase('error')
     }
-  }, [loadFrames, loadVlmEvents, startPolling])
+  }, [loadFrames, loadModalityEvents, startPolling])
 
   const [highlightMs, setHighlightMs] = useState<number | null>(null)
 
