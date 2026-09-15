@@ -533,17 +533,43 @@ button.primary:active { transform: translateY(0); }
 }
 .event-item {
   display: flex;
-  align-items: flex-start;
-  gap: 12px;
+  flex-direction: column;
+  gap: 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 12px;
   background: var(--bg-app);
   font-size: 13px;
 }
-.event-timestamp { color: var(--accent); font-weight: 600; flex-shrink: 0; width: 50px; }
-.event-content { flex: 1; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text-main); }
-.event-confidence { color: var(--text-dim); flex-shrink: 0; }
+.event-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+}
+.event-timestamp {
+  color: var(--accent);
+  background: var(--accent-bg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.event-content {
+  width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-main);
+  background: #fff;
+  padding: 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.event-confidence {
+  color: var(--text-dim);
+  font-weight: 500;
+}
 
 .app-center-msg {
   display: flex;

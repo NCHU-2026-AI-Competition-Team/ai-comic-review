@@ -56,9 +56,11 @@ export default function OcrPanel({ videoId, onEvents }: Props) {
         <ul className="event-list">
           {events.map((event) => (
             <li key={event.id} className="event-item">
-              <span className="event-timestamp">{formatTimestamp(event.start_ms)}</span>
-              <span className="event-content">{event.content}</span>
-              <span className="event-confidence">{(event.confidence * 100).toFixed(1)}%</span>
+              <div className="event-header">
+                <span className="event-timestamp">{formatTimestamp(event.start_ms)}</span>
+                <span className="event-confidence">{(event.confidence * 100).toFixed(1)}%</span>
+              </div>
+              <div className="event-content">{event.content}</div>
             </li>
           ))}
         </ul>
