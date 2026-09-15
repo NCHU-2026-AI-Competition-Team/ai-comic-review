@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import type { TimelineEvent } from '../types'
 import { ApiError, getEvents, runAsr } from '../api/videos'
 import { formatTimestamp } from './FramesGrid'
@@ -14,6 +14,17 @@ export default function AsrPanel({ videoId, onEvents }: Props) {
   const [running, setRunning] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [reused, setReused] = useState(false)
+  const [recovered, setRecovered] = useState(false)
+  const [elapsed, setElapsed] = useState(0)
+
+  useEffect(() => {
+    if (!running) {
+      setElapsed(0)
+      return
+    }
+    const timer = setInterval(() => setElapsed((s) => s + 1), 1000)
+    return () => clearInterval(timer)
+  }, [running])
 
   const hasResult = events !== null
 
@@ -22,6 +33,7 @@ export default function AsrPanel({ videoId, onEvents }: Props) {
       setRunning(true)
       setError(null)
       setReused(false)
+      setRecovered(false)
       // 重跑期间保留旧结果，仅在新结果成功返回后替换
       try {
         const res = await runAsr(videoId, force)
@@ -33,7 +45,14 @@ export default function AsrPanel({ videoId, onEvents }: Props) {
         if (err instanceof ApiError && err.status === 409) {
           setError(err.message)
         } else {
-          setError(err instanceof Error ? err.message : 'ASR 识别失败')
+          try {
+            const newEvents = await getEvents(videoId, 'asr')
+            setEvents(newEvents)
+            if (onEvents) onEvents(newEvents)
+            setRecovered(true)
+          } catch (fallbackErr) {
+            setError(err instanceof Error ? err.message : 'ASR 识别失败')
+          }
         }
       } finally {
         setRunning(false)
@@ -46,10 +65,11 @@ export default function AsrPanel({ videoId, onEvents }: Props) {
     <div className="modality-panel">
       <h3>语音识别（ASR）</h3>
       <button className="primary" type="button" disabled={running} onClick={() => void handleRun(hasResult)}>
-        {running ? (hasResult ? '正在重跑 ASR……' : 'ASR 识别中……') : hasResult ? '重跑 ASR' : '运行 ASR'}
+        {running ? (hasResult ? `正在重跑 ASR…… 已等待 ${elapsed}s` : `ASR 识别中…… 已等待 ${elapsed}s`) : hasResult ? '重跑 ASR' : '运行 ASR'}
       </button>
       {running && hasResult && <p className="hint">正在重跑，旧结果暂时保留</p>}
       {reused && <p className="hint">已复用上次成功结果</p>}
+      {recovered && <p className="hint" style={{ color: '#4caf50' }}>已从服务端恢复结果</p>}
       {error && <p className="form-error">{error}</p>}
       {events && events.length === 0 && <p className="hint">未识别到任何语音</p>}
       {events && events.length > 0 && (

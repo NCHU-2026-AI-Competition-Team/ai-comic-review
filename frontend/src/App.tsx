@@ -7,7 +7,7 @@ import AsrPanel from './components/AsrPanel'
 import TimelineSwimlanes from './components/TimelineSwimlanes'
 import RiskReportPanel from './components/RiskReportPanel'
 import HistoryList from './components/HistoryList'
-import { ApiError, getEvents, getFrames, getVideo, uploadVideo, runOcr, runAsr, runReview } from './api/videos'
+import { ApiError, getEvents, getFrames, getVideo, uploadVideo, runOcr, runAsr, runReview, getReport } from './api/videos'
 import type { FramesInfo, SamplingMode, TimelineEvent, VideoJob, VideoUploadResponse } from './types'
 
 type Phase = 'idle' | 'uploading' | 'processing' | 'processed' | 'failed' | 'error'
@@ -60,6 +60,17 @@ export default function App() {
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatus>({ state: 'idle', stage: null, message: '', retry: false })
   const [reportRefreshKey, setReportRefreshKey] = useState(0)
 
+  const [workflowElapsed, setWorkflowElapsed] = useState(0)
+
+  useEffect(() => {
+    if (workflowStatus.state !== 'running') {
+      setWorkflowElapsed(0)
+      return
+    }
+    const timer = setInterval(() => setWorkflowElapsed((s) => s + 1), 1000)
+    return () => clearInterval(timer)
+  }, [workflowStatus.state])
+
   const handleRunWorkflow = useCallback(async (videoId: string) => {
     setWorkflowStatus({ state: 'running', stage: 'ocr', message: '正在执行 OCR...', retry: false })
 
@@ -75,27 +86,56 @@ export default function App() {
       }
     }
 
+    const runStep = async (
+      runApi: () => Promise<any>,
+      getFallback: () => Promise<any>
+    ) => {
+      try {
+        return { success: true, res: await callWithRetry(runApi), recovered: false }
+      } catch (err) {
+        try {
+          const fallbackRes = await getFallback()
+          return { success: true, res: fallbackRes, recovered: true }
+        } catch (fallbackErr) {
+          throw err
+        }
+      }
+    }
+
+    const refreshAll = async () => {
+      try {
+        const [newOcr, newAsr, newVlm] = await Promise.all([
+          getEvents(videoId, 'ocr'),
+          getEvents(videoId, 'asr'),
+          getEvents(videoId, 'vlm'),
+        ])
+        if (activeVideoIdRef.current === videoId) {
+          setEvents((prev) => ({ ...prev, ocr: newOcr, asr: newAsr, vlm: newVlm }))
+          setReportRefreshKey((k) => k + 1)
+        }
+      } catch (e) {
+        // ignore fetch errors during refresh
+      }
+    }
+
     try {
-      const ocrRes = await callWithRetry(() => runOcr(videoId))
-      setWorkflowStatus({ state: 'running', stage: 'asr', message: `OCR 完成 (事件: ${ocrRes.event_count})，正在执行 ASR...`, retry: false })
+      const ocrStep = await runStep(() => runOcr(videoId), () => getEvents(videoId, 'ocr'))
+      const ocrCount = ocrStep.recovered ? ocrStep.res.length : ocrStep.res.event_count
+      const ocrMsg = ocrStep.recovered ? `OCR 恢复 (事件: ${ocrCount})` : `OCR 完成 (事件: ${ocrCount})`
+      setWorkflowStatus({ state: 'running', stage: 'asr', message: `${ocrMsg}，正在执行 ASR...`, retry: false })
 
-      const asrRes = await callWithRetry(() => runAsr(videoId))
-      setWorkflowStatus({ state: 'running', stage: 'review', message: `ASR 完成 (事件: ${asrRes.event_count})，正在执行多模态审核...`, retry: false })
+      const asrStep = await runStep(() => runAsr(videoId), () => getEvents(videoId, 'asr'))
+      const asrCount = asrStep.recovered ? asrStep.res.length : asrStep.res.event_count
+      const asrMsg = asrStep.recovered ? `ASR 恢复 (事件: ${asrCount})` : `ASR 完成 (事件: ${asrCount})`
+      setWorkflowStatus({ state: 'running', stage: 'review', message: `${asrMsg}，正在执行多模态审核...`, retry: false })
 
-      await callWithRetry(() => runReview(videoId))
+      await runStep(() => runReview(videoId), () => getReport(videoId))
 
-      // Refresh events
-      const [newOcr, newAsr, newVlm] = await Promise.all([
-        getEvents(videoId, 'ocr'),
-        getEvents(videoId, 'asr'),
-        getEvents(videoId, 'vlm'),
-      ])
+      await refreshAll()
       if (activeVideoIdRef.current !== videoId) return
-
-      setEvents((prev) => ({ ...prev, ocr: newOcr, asr: newAsr, vlm: newVlm }))
-      setReportRefreshKey((k) => k + 1)
       setWorkflowStatus({ state: 'success', stage: null, message: '全流程审核完成', retry: false })
     } catch (err: any) {
+      await refreshAll()
       if (activeVideoIdRef.current !== videoId) return
       setWorkflowStatus((s) => ({
         state: 'failed',
@@ -105,7 +145,6 @@ export default function App() {
       }))
     }
   }, [])
-
   useEffect(() => {
     return () => cancelRef.current?.()
   }, [])
@@ -368,6 +407,7 @@ export default function App() {
                       {workflowStatus.state === 'running' && <div className="spinner" style={{ width: 12, height: 12, marginRight: 8, borderWidth: 2, display: 'inline-block' }} />}
                       <span style={{ color: workflowStatus.state === 'failed' ? 'var(--error)' : workflowStatus.state === 'success' ? '#4caf50' : 'inherit' }}>
                         {workflowStatus.message}
+                        {workflowStatus.state === 'running' && <span style={{ marginLeft: 4 }}>已等待 {workflowElapsed}s</span>}
                       </span>
                     </div>
                   )}
