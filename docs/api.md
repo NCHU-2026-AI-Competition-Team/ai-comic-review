@@ -118,6 +118,92 @@ curl -X POST "http://127.0.0.1:8000/api/videos" \
 
 ---
 
+## GET /api/videos
+
+扫描 `storage/uploads/*/job.json`，按 `created_at` 倒序返回历史任务摘要数组。每条摘要含任务基本信息、各模态是否已落盘及事件数、人工复核摘要。单个 `job.json` 非法 JSON 或字段校验失败时**跳过该项**并记 error 日志，不中断整个列表。无任务时返回空数组 `[]`。
+
+本接口无路径参数与查询参数；不引入数据库，纯文件扫描。
+
+### 请求参数
+
+无。
+
+### 响应示例（200）
+
+```json
+[
+  {
+    "video_id": "22222222-2222-2222-2222-222222222222",
+    "filename": "new.mp4",
+    "status": "processed",
+    "created_at": "2026-06-01T12:00:00",
+    "metadata": {
+      "duration": 12.5,
+      "width": 320,
+      "height": 240,
+      "fps": 10.0,
+      "codec": "h264",
+      "bitrate": 1500000
+    },
+    "modalities": {
+      "ocr": { "ran": true, "event_count": 2 },
+      "asr": { "ran": true, "event_count": 1 },
+      "vlm": { "ran": false, "event_count": 0 }
+    },
+    "verdict": {
+      "decision": "approve",
+      "note": "通过",
+      "created_at": "2026-06-01T12:30:00+00:00"
+    }
+  },
+  {
+    "video_id": "11111111-1111-1111-1111-111111111111",
+    "filename": "old.mp4",
+    "status": "processing",
+    "created_at": "2026-01-01T08:00:00",
+    "metadata": null,
+    "modalities": {
+      "ocr": { "ran": false, "event_count": 0 },
+      "asr": { "ran": false, "event_count": 0 },
+      "vlm": { "ran": false, "event_count": 0 }
+    },
+    "verdict": null
+  }
+]
+```
+
+字段说明：
+
+| 字段 | 说明 |
+| --- | --- |
+| `video_id` | 任务标识 |
+| `filename` | 上传时的原始文件名 |
+| `status` | 与任务记录一致：`processed` / `processing` / `failed` |
+| `created_at` | 任务创建时间（ISO8601），列表按此字段倒序 |
+| `metadata` | 沿用 `VideoJob.metadata`；尚未解析时为 `null` |
+| `modalities.ocr/asr/vlm.ran` | 对应 `storage/outputs/{video_id}/{modality}.json` 是否存在且可读 |
+| `modalities.ocr/asr/vlm.event_count` | 该模态事件条数；未运行或损坏视为 `0` |
+| `verdict` | 若 `verdict.json` 存在则含 `decision`、`note`、`created_at`；未提交或损坏为 `null` |
+
+本接口**不含** `frames` / `sampling` / `error` 等任务详情字段；详情仍走 `GET /api/videos/{video_id}`。
+
+### curl 示例
+
+```bash
+curl "http://127.0.0.1:8000/api/videos"
+```
+
+### 错误码
+
+| HTTP | 条件 | `detail` |
+| --- | --- | --- |
+| （无 4xx） | 无路径/查询参数，不校验 `video_id` | — |
+| （不提升为 5xx） | 单个 `job.json` 损坏或字段无法通过模型校验 | 该项从数组中省略，服务端记 error 日志 |
+
+成功恒为 200，响应体为摘要对象数组。
+
+---
+
 ## GET /api/videos/{video_id}
 
 查询任务记录：状态、采样模式、任务级覆盖参数、元数据与抽帧结果。

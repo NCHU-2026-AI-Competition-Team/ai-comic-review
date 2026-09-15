@@ -6,6 +6,7 @@
 
 import json
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -60,3 +61,33 @@ def update_job(video_id: str, **fields: object) -> Optional[VideoJob]:
         return None
     job = job.model_copy(update=fields)
     return save_job(job)
+
+
+def _created_at_sort_key(job: VideoJob) -> datetime:
+    """把 created_at 规范为 UTC 可比较时间，兼容无时区的历史记录。"""
+    created = job.created_at
+    if created.tzinfo is None:
+        return created.replace(tzinfo=timezone.utc)
+    return created.astimezone(timezone.utc)
+
+
+def list_jobs() -> list[VideoJob]:
+    """扫描 uploads 下全部 job.json，按 created_at 倒序返回；损坏项跳过。"""
+    uploads = get_settings().uploads_path
+    if not uploads.is_dir():
+        return []
+    jobs: list[VideoJob] = []
+    for path in uploads.glob(f"*/{JOB_FILENAME}"):
+        video_id = path.parent.name
+        try:
+            job = get_job(video_id)
+        except JobCorruptedError:
+            continue
+        except OSError as exc:
+            logger.error("读取任务记录失败 video_id=%s: %s", video_id, exc)
+            continue
+        if job is None:
+            continue
+        jobs.append(job)
+    jobs.sort(key=lambda job: (_created_at_sort_key(job), job.video_id), reverse=True)
+    return jobs

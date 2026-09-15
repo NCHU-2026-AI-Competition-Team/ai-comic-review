@@ -1,5 +1,6 @@
 """任务记录注册表（registry）的单元测试。"""
 
+from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
@@ -51,3 +52,38 @@ def test_save_and_get_job_roundtrip(storage: Path) -> None:
     assert loaded is not None
     assert loaded.video_id == saved.video_id
     assert loaded.status == "processing"
+
+
+def test_list_jobs_empty_when_uploads_missing(storage: Path) -> None:
+    assert registry.list_jobs() == []
+
+
+def test_list_jobs_empty_directory(storage: Path) -> None:
+    (storage / "uploads").mkdir(parents=True)
+    assert registry.list_jobs() == []
+
+
+def test_list_jobs_skips_corrupted_and_sorts_desc(storage: Path) -> None:
+    older_id = "11111111-1111-1111-1111-111111111111"
+    newer_id = "22222222-2222-2222-2222-222222222222"
+    registry.save_job(
+        VideoJob(
+            video_id=older_id,
+            filename="old.mp4",
+            created_at=datetime(2026, 1, 1, 0, 0, 0),
+        )
+    )
+    registry.save_job(
+        VideoJob(
+            video_id=newer_id,
+            filename="new.mp4",
+            created_at=datetime(2026, 6, 1, 0, 0, 0),
+        )
+    )
+    bad_dir = storage / "uploads" / "33333333-3333-3333-3333-333333333333"
+    bad_dir.mkdir(parents=True)
+    (bad_dir / "job.json").write_text("{ 不是合法 JSON", encoding="utf-8")
+
+    jobs = registry.list_jobs()
+    assert [job.video_id for job in jobs] == [newer_id, older_id]
+

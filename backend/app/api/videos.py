@@ -38,13 +38,14 @@ from app.schemas.events import (
     ReviewRunResponse,
     TimelineEvent,
 )
-from app.schemas.report import ReviewReport
+from app.schemas.report import ModalityRunStatus, ReviewReport
 from app.schemas.verdict import HumanVerdict, VerdictRequest
 from app.schemas.video import FramesInfo, SamplingMode, VideoJob, VideoUploadResponse
+from app.schemas.video_list import VideoListItem, VideoListModalities, VideoListVerdict
 from app.services import asr_pipeline, audio, ocr_pipeline, registry, vlm_pipeline
-from app.services.modality_store import modality_result_path
+from app.services.modality_store import modality_result_path, try_load_modality_events
 from app.services.storage_paths import UnsafePathError, resolve_in_dir
-from app.services.verdict_store import save_verdict
+from app.services.verdict_store import save_verdict, try_load_verdict
 from app.services.uploads import ALLOWED_VIDEO_EXTENSIONS, UploadNotFoundError, find_uploaded_file
 
 logger = logging.getLogger(__name__)
@@ -244,6 +245,55 @@ def upload_video(
         metadata=job.metadata,
         frames=job.frames,
     )
+
+
+def _modality_run_status(video_id: str, modality: EventModality) -> ModalityRunStatus:
+    """读取单模态落盘状态：文件不存在或损坏视为未运行。"""
+    try:
+        events = try_load_modality_events(video_id, modality)
+    except InvalidVideoIdError:
+        return ModalityRunStatus(ran=False, event_count=0)
+    if events is None:
+        return ModalityRunStatus(ran=False, event_count=0)
+    return ModalityRunStatus(ran=True, event_count=len(events))
+
+
+def _list_verdict(video_id: str) -> Optional[VideoListVerdict]:
+    """读取列表用复核摘要；未提交或损坏返回 None。"""
+    try:
+        verdict = try_load_verdict(video_id)
+    except InvalidVideoIdError:
+        return None
+    if verdict is None:
+        return None
+    return VideoListVerdict(
+        decision=verdict.decision,
+        note=verdict.note,
+        created_at=verdict.created_at,
+    )
+
+
+def _job_to_list_item(job: VideoJob) -> VideoListItem:
+    """把任务记录组装为列表摘要，复用模态与复核的原子读路径。"""
+    return VideoListItem(
+        video_id=job.video_id,
+        filename=job.filename,
+        status=job.status,
+        created_at=job.created_at,
+        metadata=job.metadata,
+        modalities=VideoListModalities(
+            ocr=_modality_run_status(job.video_id, "ocr"),
+            asr=_modality_run_status(job.video_id, "asr"),
+            vlm=_modality_run_status(job.video_id, "vlm"),
+        ),
+        verdict=_list_verdict(job.video_id),
+    )
+
+
+@router.get("", response_model=list[VideoListItem])
+def list_videos() -> list[VideoListItem]:
+    """扫描已落盘的任务记录，按创建时间倒序返回历史任务摘要。"""
+    return [_job_to_list_item(job) for job in registry.list_jobs()]
 
 
 @router.get("/{video_id}", response_model=VideoJob)

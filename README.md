@@ -72,6 +72,7 @@ uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 
 - `GET /api/health` — 健康检查
 - `POST /api/videos` — 上传视频（multipart 字段名 `file`）
+- `GET /api/videos` — 历史任务列表（扫描 `job.json`，含各模态与复核摘要；损坏记录跳过）
 - `GET /api/videos/{video_id}` — 查询任务状态与结果
 - `GET /api/videos/{video_id}/frames` — 帧清单
 - `GET /api/videos/{video_id}/frames/{filename}` — 帧图片
