@@ -416,14 +416,16 @@ curl -O "http://127.0.0.1:8000/api/videos/12345678-1234-1234-1234-1234567890ab/f
 
 ## POST /api/videos/{video_id}/ocr
 
-对已完成抽帧的视频**同步**执行 OCR，结果落盘 `storage/outputs/{video_id}/ocr.json`。当前实现**总是重新识别**，不复用已有结果。
+对已完成抽帧的视频**同步**执行 OCR，结果落盘 `storage/outputs/{video_id}/ocr.json`。
+
+幂等语义：默认若已有完好的 `ocr.json` 则直接复用并标注 `reused=true`；`force=true` 才忽略已有结果重新识别。损坏的 `ocr.json` 会被删除后重跑。
 
 ### 请求参数
 
 | 名称 | 位置 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- | --- |
 | `video_id` | path | UUID 字符串 | 是 | 任务标识 |
-| `force` | query | 布尔 | 否 | 默认 `false`。与 ASR 接口对齐的保留参数；OCR **忽略该值**，始终重新识别 |
+| `force` | query | 布尔 | 否 | 默认 `false`。为 `true` 时忽略已有 `ocr.json` 强制重跑 |
 
 ### 响应示例（200）
 
@@ -436,7 +438,7 @@ curl -O "http://127.0.0.1:8000/api/videos/12345678-1234-1234-1234-1234567890ab/f
 }
 ```
 
-`reused` 因 OCR 总是重跑而恒为 `false`。无文本帧不计入事件。
+复用已有结果时 `reused` 为 `true`。无文本帧不计入事件。
 
 ### curl 示例
 

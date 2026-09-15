@@ -7,13 +7,15 @@ TimelineEvent（modality='ocr'）：时间戳与帧的 timestamp_ms 对齐
 逐行明细（文本/置信度/文本框）保留在 metadata.lines。
 结果落盘 storage/outputs/{video_id}/ocr.json。
 
-无文本帧不产生事件；单帧识别失败记警告并跳过该帧，不中断整体；
+默认复用已有 ocr.json；force=True 才重跑。无文本帧不产生事件；
+单帧识别失败记警告并跳过该帧，不中断整体；
 frames.json 不存在或损坏明确抛错。
 """
 
 import json
 import logging
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
@@ -21,7 +23,11 @@ from app.core.config import ROOT_DIR, get_settings
 from app.core.ids import normalize_video_id
 from app.schemas.events import TimelineEvent
 from app.schemas.video import FrameInfo, FramesInfo
-from app.services.modality_store import modality_result_path, write_modality_events
+from app.services.modality_store import (
+    modality_result_path,
+    try_load_modality_events,
+    write_modality_events,
+)
 from app.services.storage_paths import resolve_in_dir
 from app.services.video import FRAMES_JSON
 
@@ -44,6 +50,14 @@ class FramesNotFoundError(FileNotFoundError):
 
 class FramesCorruptedError(RuntimeError):
     """frames.json 内容损坏（非法 JSON 或字段校验失败）。"""
+
+
+@dataclass
+class OcrRunOutcome:
+    """OCR 一次执行的结果：事件列表以及是否复用了已有 ocr.json。"""
+
+    events: list[TimelineEvent]
+    reused: bool = False
 
 
 def load_frames_info(video_id: str) -> FramesInfo:
@@ -113,12 +127,25 @@ def ocr_result_path(video_id: str) -> Path:
     return modality_result_path(video_id, "ocr")
 
 
-def run_ocr(video_id: str, provider: Optional[OcrProvider] = None) -> list[TimelineEvent]:
-    """对指定视频执行 OCR，聚合结果落盘 ocr.json 并返回事件列表。
+def run_ocr(
+    video_id: str,
+    provider: Optional[OcrProvider] = None,
+    force: bool = False,
+) -> OcrRunOutcome:
+    """对指定视频执行 OCR，聚合结果落盘 ocr.json 并返回执行结果。
 
+    默认复用已有且完好的 ocr.json；force=True 时忽略已有结果重跑。
     provider 可注入以便测试替换；默认使用进程级惰性单例（工厂入口）。
     """
     video_id = normalize_video_id(video_id)
+    if not force:
+        existing = try_load_modality_events(video_id, "ocr")
+        if existing is not None:
+            logger.info(
+                "OCR 复用已有结果 video_id=%s 事件数=%d", video_id, len(existing)
+            )
+            return OcrRunOutcome(events=existing, reused=True)
+
     frames_info = load_frames_info(video_id)
     if provider is None:
         provider = get_default_provider()
@@ -147,4 +174,4 @@ def run_ocr(video_id: str, provider: Optional[OcrProvider] = None) -> list[Timel
         "OCR 完成 video_id=%s 帧数=%d 事件数=%d 失败帧数=%d",
         video_id, len(frames_info.frames), len(events), failed,
     )
-    return events
+    return OcrRunOutcome(events=events, reused=False)

@@ -113,8 +113,10 @@ def test_run_ocr_skips_empty_and_failed_frames(tmp_path: Path) -> None:
                 return []
             return [OcrTextLine(text="你好", bbox=[[0, 0], [1, 0], [1, 1], [0, 1]], confidence=0.8)]
 
-    events = run_ocr(VIDEO_ID, provider=FakeProvider())
+    outcome = run_ocr(VIDEO_ID, provider=FakeProvider())
 
+    assert outcome.reused is False
+    events = outcome.events
     assert len(events) == 1
     assert events[0].id == "ocr-frame_000000"
     assert events[0].content == "你好"
@@ -136,8 +138,9 @@ def test_run_ocr_all_frames_empty_produces_empty_result(tmp_path: Path) -> None:
         def recognize(self, image_path: Path) -> list[OcrTextLine]:
             return []
 
-    events = run_ocr(VIDEO_ID, provider=EmptyProvider())
-    assert events == []
+    outcome = run_ocr(VIDEO_ID, provider=EmptyProvider())
+    assert outcome.reused is False
+    assert outcome.events == []
 
     payload = json.loads(
         (get_settings().outputs_path / VIDEO_ID / "ocr.json").read_text(encoding="utf-8")
@@ -172,9 +175,9 @@ def test_run_ocr_default_provider_uses_singleton(
         return StubProvider()
 
     monkeypatch.setattr(ocr_pipeline, "get_default_provider", fake_get_default_provider)
-    events = run_ocr(VIDEO_ID)
+    outcome = run_ocr(VIDEO_ID)
     assert called == [True]
-    assert len(events) == 1 and events[0].content == "stub"
+    assert len(outcome.events) == 1 and outcome.events[0].content == "stub"
 
 
 def test_frame_lines_to_event_clamps_out_of_range_confidence() -> None:
@@ -199,9 +202,59 @@ def test_run_ocr_tolerates_out_of_range_confidence() -> None:
             return [OcrTextLine(text="越界", bbox=[[0, 0]], confidence=2.0)]
 
     _write_frames_json([_frame()])
-    events = run_ocr(VIDEO_ID, provider=OutOfRangeProvider())
-    assert len(events) == 1
-    assert events[0].confidence == 1.0
+    outcome = run_ocr(VIDEO_ID, provider=OutOfRangeProvider())
+    assert len(outcome.events) == 1
+    assert outcome.events[0].confidence == 1.0
+
+
+def _counting_provider(calls: dict):
+    class CountingProvider:
+        def recognize(self, image_path: Path) -> list[OcrTextLine]:
+            calls["count"] += 1
+            return [OcrTextLine(text="你好", bbox=[[0, 0]], confidence=0.8)]
+
+    return CountingProvider()
+
+
+def test_run_ocr_second_call_reuses_existing_result() -> None:
+    """默认复用已有完好的 ocr.json 并标注 reused=True，不再调用引擎。"""
+    _write_frames_json([_frame()])
+    calls = {"count": 0}
+    provider = _counting_provider(calls)
+
+    first = run_ocr(VIDEO_ID, provider=provider)
+    assert first.reused is False
+    second = run_ocr(VIDEO_ID, provider=provider)
+    assert second.reused is True
+    assert second.events == first.events
+    assert calls["count"] == 1
+
+
+def test_run_ocr_force_true_reruns() -> None:
+    """force=True 时忽略已有 ocr.json 重新识别。"""
+    _write_frames_json([_frame()])
+    calls = {"count": 0}
+    provider = _counting_provider(calls)
+
+    assert run_ocr(VIDEO_ID, provider=provider).reused is False
+    forced = run_ocr(VIDEO_ID, provider=provider, force=True)
+    assert forced.reused is False
+    assert calls["count"] == 2
+
+
+def test_run_ocr_corrupted_result_reruns() -> None:
+    """已有 ocr.json 损坏时删除后重跑（与 ASR/VLM 的损坏恢复一致）。"""
+    _write_frames_json([_frame()])
+    calls = {"count": 0}
+    provider = _counting_provider(calls)
+
+    assert run_ocr(VIDEO_ID, provider=provider).reused is False
+    result_file = get_settings().outputs_path / VIDEO_ID / "ocr.json"
+    result_file.write_text("{ 不是合法 JSON", encoding="utf-8")
+
+    outcome = run_ocr(VIDEO_ID, provider=provider)
+    assert outcome.reused is False
+    assert calls["count"] == 2
 
 
 def test_pipeline_does_not_import_concrete_provider() -> None:

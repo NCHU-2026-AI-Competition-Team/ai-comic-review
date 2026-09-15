@@ -444,9 +444,12 @@ def get_frame_image(video_id: str, filename: str) -> FileResponse:
 @router.post("/{video_id}/ocr", response_model=ModalityRunResponse)
 def run_video_ocr(
     video_id: str,
-    force: bool = Query(False, description="与 ASR 接口对齐的保留参数；OCR 当前总是重新识别"),
+    force: bool = Query(False, description="为 true 时忽略已有 ocr.json 强制重跑"),
 ) -> ModalityRunResponse:
-    """对已完成抽帧的视频同步执行 OCR，产出 ocr 模态时间线事件。"""
+    """对已完成抽帧的视频同步执行 OCR，产出 ocr 模态时间线事件。
+
+    默认复用已有 ocr.json 并标注 reused=true；force=true 才重新识别。
+    """
     video_id = _validate_video_id(video_id)
     try:
         job = registry.get_job(video_id)
@@ -455,12 +458,17 @@ def run_video_ocr(
     if job is None:
         raise HTTPException(status_code=404, detail="视频不存在")
     try:
-        events = ocr_pipeline.run_ocr(video_id)
+        outcome = ocr_pipeline.run_ocr(video_id, force=force)
     except ocr_pipeline.FramesNotFoundError as exc:
         raise HTTPException(status_code=409, detail="尚未完成抽帧，请先完成视频处理") from exc
     except ocr_pipeline.FramesCorruptedError as exc:
         raise HTTPException(status_code=500, detail="帧清单文件损坏") from exc
-    return ModalityRunResponse(video_id=video_id, modality="ocr", event_count=len(events))
+    return ModalityRunResponse(
+        video_id=video_id,
+        modality="ocr",
+        event_count=len(outcome.events),
+        reused=outcome.reused,
+    )
 
 
 @router.post("/{video_id}/asr", response_model=ModalityRunResponse)

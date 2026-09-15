@@ -73,7 +73,7 @@ backend/app/
 │   ├── video/         #   视频处理包：__init__.py（ffprobe 元数据、固定帧率抽帧、frames.json 落盘、流程编排）
 │   │   └── scene.py   #   镜头切换检测（scene_change 采样模式）
 │   ├── audio.py       #   音频提取：ffprobe 音轨探测 + ffmpeg 提取 16kHz 单声道 PCM wav（临时文件+校验+原子替换）
-│   ├── ocr_pipeline.py#   OCR 编排：读 frames.json → 逐帧识别 → TimelineEvent → ocr.json
+│   ├── ocr_pipeline.py#   OCR 编排：读 frames.json → 逐帧识别 → TimelineEvent → ocr.json（默认幂等复用）
 │   ├── asr_pipeline.py#   ASR 编排：确保 audio.wav → 云端识别 → TimelineEvent → asr.json（默认幂等复用）
 │   ├── vlm_pipeline.py#   VLM 编排：读帧 + OCR/ASR → 云端主审 → TimelineEvent → vlm.json（默认幂等复用）
 │   ├── modality_store.py # 模态事件原子落盘与损坏恢复（OCR/ASR/VLM 共用）
@@ -145,17 +145,19 @@ POST /api/videos/{video_id}/ocr
   ├─ 1. video_id 校验；任务记录不存在 404
   ├─ 2. frames.json 不存在（未抽帧）返回 409 并提示先完成抽帧；损坏返回 500
   ├─ 3. services/ocr_pipeline.run_ocr 同步执行（本阶段不引入任务队列）：
-  │      a. 逐帧调用 ai.ocr 的 OcrProvider.recognize（惰性单例，工厂按
+  │      a. 默认复用已有且完好的 ocr.json（返回 reused=true）；
+  │         损坏的 ocr.json 删除后重跑；force=true 才忽略已有结果
+  │      b. 逐帧调用 ai.ocr 的 OcrProvider.recognize（惰性单例，工厂按
   │         OCR_PROVIDER 选择本地 PaddleOcrProvider 或 RemoteOcrProvider）
-  │      b. 每帧文字行聚合为 TimelineEvent：modality='ocr'，
+  │      c. 每帧文字行聚合为 TimelineEvent：modality='ocr'，
   │         start_ms=end_ms=帧的 timestamp_ms（与抽帧时间轴严格对齐，
   │         供后续 ASR/视觉/VLM 事件在同一时间轴上融合）；
   │         content 为各行文本换行拼接，confidence 取各行均值，
   │         逐行明细（text/confidence/box）保留在 metadata.lines
-  │      c. 无文本帧不产事件；单帧识别失败记 warning 跳过，不中断整体
-  │      d. 结果落盘 storage/outputs/{video_id}/ocr.json
+  │      d. 无文本帧不产事件；单帧识别失败记 warning 跳过，不中断整体
+  │      e. 结果落盘 storage/outputs/{video_id}/ocr.json
   │         （{video_id, modality, events: [...]}）
-  └─ 4. 返回 {video_id, modality: 'ocr', event_count}
+  └─ 4. 返回 {video_id, modality: 'ocr', event_count, reused}
 
 GET /api/videos/{video_id}/events?modality=ocr
   └─ 读取 outputs/{video_id}/{modality}.json 返回 TimelineEvent 列表；

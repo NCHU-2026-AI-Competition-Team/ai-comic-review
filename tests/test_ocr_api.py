@@ -129,6 +129,52 @@ def test_run_ocr_and_get_events_roundtrip(
     assert len(event["metadata"]["lines"]) == 2
 
 
+def test_run_ocr_second_call_reuses(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """重复触发默认复用已有 ocr.json，响应标注 reused=true。"""
+    _save_job()
+    _write_frames_json()
+    calls = {"count": 0}
+
+    class CountingProvider:
+        def recognize(self, image_path: Path) -> list[OcrTextLine]:
+            calls["count"] += 1
+            return FakeProvider().recognize(image_path)
+
+    monkeypatch.setattr(ocr_pipeline, "get_default_provider", lambda: CountingProvider())
+
+    first = client.post(f"/api/videos/{VALID_VIDEO_ID}/ocr")
+    assert first.status_code == 200
+    assert first.json()["reused"] is False
+    second = client.post(f"/api/videos/{VALID_VIDEO_ID}/ocr")
+    assert second.status_code == 200
+    assert second.json() == {
+        "video_id": VALID_VIDEO_ID,
+        "modality": "ocr",
+        "event_count": 1,
+        "reused": True,
+    }
+    assert calls["count"] == 1
+
+
+def test_run_ocr_force_true_reruns(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """force=true 时忽略已有结果重新识别。"""
+    _save_job()
+    _write_frames_json()
+    calls = {"count": 0}
+
+    class CountingProvider:
+        def recognize(self, image_path: Path) -> list[OcrTextLine]:
+            calls["count"] += 1
+            return FakeProvider().recognize(image_path)
+
+    monkeypatch.setattr(ocr_pipeline, "get_default_provider", lambda: CountingProvider())
+    assert client.post(f"/api/videos/{VALID_VIDEO_ID}/ocr").status_code == 200
+    forced = client.post(f"/api/videos/{VALID_VIDEO_ID}/ocr?force=true")
+    assert forced.status_code == 200
+    assert forced.json()["reused"] is False
+    assert calls["count"] == 2
+
+
 def test_get_events_not_generated(client: TestClient) -> None:
     response = client.get(f"/api/videos/{VALID_VIDEO_ID}/events?modality=ocr")
     assert response.status_code == 404
