@@ -59,7 +59,8 @@ export default function TimelineSwimlanes({ duration, currentTimeMs, events, onS
     )
   }
 
-  const cursorLeft = `${Math.min(100, Math.max(0, (currentTimeMs / totalMs) * 100))}%`
+  const ratio = Math.min(1, Math.max(0, currentTimeMs / totalMs))
+  const cursorLeft = `calc(98px + (100% - 114px) * ${ratio})`
 
   return (
     <div className="timeline-swimlanes" style={{ borderTop: '1px solid var(--border)' }}>

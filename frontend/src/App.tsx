@@ -371,7 +371,7 @@ export default function App() {
             </div>
 
             <div className="workbench-main">
-              <div className="workbench-left" style={{ display: 'flex', flexDirection: 'column' }}>
+              <div className="workbench-left" style={{ display: 'flex', flexDirection: 'column', position: 'relative' }}>
                 <video
                   ref={videoRef}
                   className="workbench-video"
