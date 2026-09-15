@@ -6,6 +6,7 @@ import OcrPanel from './components/OcrPanel'
 import AsrPanel from './components/AsrPanel'
 import TimelineSwimlanes from './components/TimelineSwimlanes'
 import RiskReportPanel from './components/RiskReportPanel'
+import HistoryList from './components/HistoryList'
 import { ApiError, getEvents, getFrames, getVideo, uploadVideo, runOcr, runAsr, runReview } from './api/videos'
 import type { FramesInfo, SamplingMode, TimelineEvent, VideoJob, VideoUploadResponse } from './types'
 
@@ -223,6 +224,40 @@ export default function App() {
     setWorkflowStatus({ state: 'idle', stage: null, message: '', retry: false })
   }, [])
 
+  const handleSelectHistory = useCallback(async (videoId: string) => {
+    cancelRef.current?.()
+    activeVideoIdRef.current = videoId
+    setPhase('processing')
+    setJob(null)
+    setFramesInfo(null)
+    setError(null)
+    setEvents({ ocr: [], asr: [], vision: [], vlm: [] })
+    setCurrentTimeMs(0)
+    setVideoDurationSec(null)
+    setWorkflowStatus({ state: 'idle', stage: null, message: '', retry: false })
+
+    try {
+      const current = await getVideo(videoId)
+      if (activeVideoIdRef.current !== videoId) return
+      setJob(current)
+      if (current.status === 'processed') {
+        setPhase('processed')
+        await loadFrames(videoId, current.frames)
+        await loadVlmEvents(videoId)
+      } else if (current.status === 'failed') {
+        setError(current.error ?? '视频处理失败')
+        setPhase('failed')
+      } else {
+        setPhase('processing')
+        startPolling(videoId)
+      }
+    } catch (err) {
+      if (activeVideoIdRef.current !== videoId) return
+      setError(err instanceof Error ? err.message : '加载历史任务失败')
+      setPhase('error')
+    }
+  }, [loadFrames, loadVlmEvents, startPolling])
+
   const [highlightMs, setHighlightMs] = useState<number | null>(null)
 
   const handleSeekAndPause = useCallback((ms: number) => {
@@ -240,13 +275,16 @@ export default function App() {
   }, [])
 
   return (
-    <div className="app">
-      <header className="app-header">
-        <h1>AI Comic Review</h1>
-        <p>上传视频，自动解析元数据并抽取关键帧</p>
-      </header>
+    <div className="app-container">
+      <aside className="app-sidebar">
+        <div className="brand">
+          <h1>AI 漫审</h1>
+          <p>短视频内容安全控制台</p>
+        </div>
+        <HistoryList onSelect={handleSelectHistory} activeVideoId={job?.video_id} />
+      </aside>
 
-      <main>
+      <main className="app-main">
         {phase === 'error' && (
           <div className="error-banner">
             <span>{error}</span>

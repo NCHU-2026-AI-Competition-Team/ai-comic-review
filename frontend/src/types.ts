@@ -117,3 +117,16 @@ export interface RiskReport {
     event_id: string | null
   } | null
 }
+
+export interface VideoSummary {
+  video_id: string
+  filename: string
+  status: VideoStatus
+  created_at: string
+  modalities: {
+    ocr: { ran: boolean; event_count: number }
+    asr: { ran: boolean; event_count: number }
+    vlm: { ran: boolean; event_count: number }
+  }
+  verdict: { decision: 'approve' | 'reject' | 'false_positive' } | null
+}

@@ -7,6 +7,7 @@ import type {
   TimelineEvent,
   VideoJob,
   VideoUploadResponse,
+  VideoSummary,
 } from '../types'
 
 const BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? ''
@@ -161,4 +162,12 @@ export async function submitVerdict(
   if (!res.ok) {
     throw await parseError(res)
   }
+}
+
+export async function getVideos(): Promise<VideoSummary[]> {
+  const res = await fetch(`${BASE_URL}/api/videos`)
+  if (!res.ok) {
+    throw await parseError(res)
+  }
+  return (await res.json()) as VideoSummary[]
 }
